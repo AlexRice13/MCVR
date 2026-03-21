@@ -25,3 +25,15 @@
 [submodule "extern/FidelityFX-SDK"]
 	path = extern/FidelityFX-SDK
 	url = https://github.com/Interstellarss/FidelityFX-SDK.git
+[submodule "extern/sharc"]
+	path = extern/sharc
+	url = https://github.com/NVIDIA-RTX/SHARC.git
+[submodule "extern/minizip-ng"]
+	path = extern/minizip-ng
+	url = https://github.com/zlib-ng/minizip-ng.git
+[submodule "extern/json"]
+	path = extern/json
+	url = https://github.com/nlohmann/json.git
+[submodule "extern/xess"]
+	path = extern/xess
+	url = https://github.com/intel/xess.git

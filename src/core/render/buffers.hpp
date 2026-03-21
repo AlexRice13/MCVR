@@ -21,6 +21,7 @@ class Buffers : public SharedObject<Buffers> {
     void initializeBuffer(uint32_t id, uint32_t size, VkBufferUsageFlags usageFlags);
     void buildIndexBuffer(uint32_t dstId, int type, int drawMode, int vertexCount, int expectedIndexCount);
     void queueOverlayUpload(uint8_t *srcPointer, uint32_t dstId);
+    void queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> buffer);
     void queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer,
                                    std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer);
     void performQueuedUpload();
@@ -74,4 +75,5 @@ class Buffers : public SharedObject<Buffers> {
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> importantIndexVertexBuffer_;
 
     bool useJitter_ = true;
+    std::recursive_mutex mtx_;
 };

@@ -1,11 +1,12 @@
 if(WIN32)
     add_definitions(-DNOMINMAX)
-    set(GLSLVALIDATOR glslangValidator.exe) 
+    set(GLSLVALIDATOR glslangValidator.exe)
 else()
     set(GLSLVALIDATOR glslangValidator)
 endif(WIN32)
 
 file(GLOB_RECURSE GLSL_SHADERS CONFIGURE_DEPENDS "*.vert" "*.frag" "*.rgen" "*.rmiss" "*.rchit" "*.rahit" "*.comp")
+list(FILTER GLSL_SHADERS EXCLUDE REGEX "world/ray_tracing/internal") # exclude world shaders
 file(GLOB_RECURSE GLSL_DEPENDS CONFIGURE_DEPENDS "../common/*.hpp" "../common/*.glsl" "util/*.glsl")
 
 set(SPIRV_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/shaders")
@@ -21,10 +22,10 @@ foreach(GLSL_SHADER ${GLSL_SHADERS})
     get_filename_component(FILE_NAME "${GLSL_SHADER}" NAME_WE)
     get_filename_component(FILE_EXT "${GLSL_SHADER}" LAST_EXT)
     string(REPLACE "." "" FILE_TYPE "${FILE_EXT}")
-    
+
     set(OUTPUT_DIR "${SPIRV_OUTPUT_PATH}/${REL_DIR}")
     set(SPIRV_FILE "${OUTPUT_DIR}/${FILE_NAME}_${FILE_TYPE}.spv")
-    
+
     add_custom_command(
         OUTPUT "${SPIRV_FILE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUTPUT_DIR}"
@@ -33,7 +34,7 @@ foreach(GLSL_SHADER ${GLSL_SHADERS})
         VERBATIM
         COMMAND_EXPAND_LISTS
     )
-    
+
     list(APPEND SPIRV_OUTPUT_FILES "${SPIRV_FILE}")
 endforeach()
 
@@ -52,3 +53,33 @@ install(
     DESTINATION ${MCVR_INSTALL_LIB_DIR}/shaders
     FILES_MATCHING PATTERN "*.spv"
 )
+
+set(ZIP_INSTALL_DEST "${MCVR_INSTALL_LIB_DIR}/shaders/world/ray_tracing")
+set(RT_INTERNAL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/world/ray_tracing/internal")
+set(RT_UTIL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/util")
+set(RT_COMMON_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../common")
+set(RT_SHARC_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/sharc/include")
+set(RT_ZIP_STAGING_DIR "${CMAKE_CURRENT_BINARY_DIR}/ray_tracing_internal_zip")
+
+install(CODE "
+    file(MAKE_DIRECTORY \"${ZIP_INSTALL_DEST}\")
+
+    file(REMOVE_RECURSE \"${RT_ZIP_STAGING_DIR}\")
+    file(MAKE_DIRECTORY \"${RT_ZIP_STAGING_DIR}\")
+    file(COPY \"${RT_INTERNAL_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}\")
+    file(COPY \"${RT_UTIL_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}/util\")
+    file(COPY \"${RT_COMMON_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}/common\")
+    file(COPY \"${RT_SHARC_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}/extern/sharc/include\")
+
+    execute_process(
+        COMMAND \"${CMAKE_COMMAND}\" -E tar \"cf\" \"${ZIP_INSTALL_DEST}/internal.zip\" --format=zip .
+        WORKING_DIRECTORY \"${RT_ZIP_STAGING_DIR}\"
+        RESULT_VARIABLE ZIP_RESULT
+        OUTPUT_VARIABLE ZIP_STDOUT
+        ERROR_VARIABLE ZIP_STDERR
+    )
+    
+    if(NOT ZIP_RESULT EQUAL 0)
+        message(FATAL_ERROR \"Failed to create internal.zip (code=\${ZIP_RESULT})\\nstdout: \${ZIP_STDOUT}\\nstderr: \${ZIP_STDERR}\")
+    endif()
+")

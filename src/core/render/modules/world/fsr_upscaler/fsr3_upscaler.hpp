@@ -42,11 +42,13 @@ struct UpscalerInput {
     VkImage colorImage;
     VkImageView colorImageView;
     VkImageLayout colorLayout;
+    VkFormat colorFormat;
     VkImage depthImage;
     VkImageView depthImageView;
     VkFormat depthFormat;
     VkImage motionVectorImage;
     VkImageView motionVectorImageView;
+    VkFormat motionVectorFormat;
 
     VkImage reactiveImage;
     VkImageView reactiveImageView;
@@ -56,6 +58,7 @@ struct UpscalerInput {
     VkImage outputImage;
     VkImageView outputImageView;
     VkImageLayout outputLayout;
+    VkFormat outputFormat;
 
     float jitterOffsetX;
     float jitterOffsetY;

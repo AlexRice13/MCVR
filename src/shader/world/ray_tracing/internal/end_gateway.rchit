@@ -5,11 +5,11 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-#include "../util/disney.glsl"
-#include "../util/random.glsl"
-#include "../util/ray_cone.glsl"
-#include "../util/ray_payloads.glsl"
-#include "../util/util.glsl"
+#include "util/disney.glsl"
+#include "util/random.glsl"
+#include "util/ray_cone.glsl"
+#include "util/ray.glsl"
+#include "util/util.glsl"
 #include "common/shared.hpp"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
@@ -41,12 +41,12 @@ layout(set = 1, binding = 5) readonly buffer LastIndexBufferAddr {
 }
 lastIndexBufferAddrs;
 
-layout(set = 1, binding = 6) readonly buffer LastObjToWorldMat {
+layout(set = 1, binding = 10) readonly buffer LastObjToWorldMat {
     mat4 mat[];
 }
 lastObjToWorldMats;
 
-layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
+layout(set = 1, binding = 9) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
 
@@ -69,7 +69,7 @@ layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
 layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
-    PBRTriangle vertices[];
+    PBRVertex vertices[];
 }
 vertexBuffer;
 
@@ -78,7 +78,7 @@ layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer Ind
 }
 indexBuffer;
 
-layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
+layout(location = 0) rayPayloadInEXT MainRay mainRay;
 hitAttributeEXT vec2 attribs;
 
 vec4 projection_from_position(vec4 position) {
@@ -151,9 +151,9 @@ void main() {
     uint i2 = indexBuffer.indices[indexBaseID + 2];
 
     VertexBuffer vertexBuffer = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
-    PBRTriangle v0 = vertexBuffer.vertices[i0];
-    PBRTriangle v1 = vertexBuffer.vertices[i1];
-    PBRTriangle v2 = vertexBuffer.vertices[i2];
+    PBRVertex v0 = vertexBuffer.vertices[i0];
+    PBRVertex v1 = vertexBuffer.vertices[i1];
+    PBRVertex v2 = vertexBuffer.vertices[i2];
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
@@ -175,17 +175,9 @@ void main() {
     // add glowing radiance
     mainRay.radiance += 4 * color;
     mainRay.hitT = gl_HitTEXT;
-
-    mainRay.instanceIndex = instanceID;
-    mainRay.geometryIndex = geometryID;
-    mainRay.primitiveIndex = gl_PrimitiveID;
-    mainRay.baryCoords = baryCoords;
-    mainRay.worldPos = worldPos;
-    mainRay.normal = vec3(0);
-    mainRay.albedoValue = vec4(0.0);
-    mainRay.specularValue = vec4(0.0);
-    mainRay.normalValue = vec4(0.0);
-    mainRay.flagValue = ivec4(0);
-    mainRay.noisy = 0;
-    mainRay.stop = 1;
+    mainRay.normal = vec3(0.0);
+    rayClearMaterial(mainRay);
+    raySetNoisy(mainRay, false);
+    mainRay.hasPrevScenePos = 0u;
+    raySetStop(mainRay, true);
 }

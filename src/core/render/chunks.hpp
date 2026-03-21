@@ -15,6 +15,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -25,10 +26,11 @@ struct ChunkBuildTask {
     int64_t id;
     int geometryCount;
     int *geometryTypes;
+    const char **geometryGroupNames;
     int *geometryTextures;
     int *vertexFormats;
     int *vertexCounts;
-    vk::VertexFormat::PBRTriangle **vertices;
+    vk::VertexFormat::PBRVertex **vertices;
     bool isImportant;
 };
 
@@ -40,10 +42,13 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     uint32_t allIndexCount;
     uint32_t geometryCount;
     std::vector<World::GeometryTypes> geometryTypes;
-    std::vector<std::vector<vk::VertexFormat::PBRTriangle>> vertices;
+    std::vector<std::string> geometryGroupNames;
+    std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> vertexBuffers;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> indexBuffers;
+    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> positionBuffers;
+    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> materialBuffers;
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
 
@@ -56,7 +61,8 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
                    uint32_t allIndexCount,
                    uint32_t geometryCount,
                    std::vector<World::GeometryTypes> &&geometryTypes,
-                   std::vector<std::vector<vk::VertexFormat::PBRTriangle>> &&vertices,
+                   std::vector<std::string> &&geometryGroupNames,
+                   std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                    std::vector<std::vector<uint32_t>> &&indices);
 
     void build();
@@ -113,9 +119,12 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     uint32_t allIndexCount;
     uint32_t geometryCount;
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
+    std::shared_ptr<std::vector<std::string>> geometryGroupNames;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
-    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
+    std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> positionBuffers;
+    std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> materialBuffers;
+    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRVertex>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
 };
 
@@ -135,12 +144,15 @@ struct Chunk1 : public SharedObject<Chunk1> {
     int64_t blasVersion = -1;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
+    std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> positionBuffers;
+    std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> materialBuffers;
 
     uint32_t allVertexCount;
     uint32_t allIndexCount;
     uint32_t geometryCount;
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
-    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
+    std::shared_ptr<std::vector<std::string>> geometryGroupNames;
+    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRVertex>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
 
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos);

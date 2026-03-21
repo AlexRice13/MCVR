@@ -124,6 +124,10 @@ NVSDK_NGX_Result NgxContext::init(const NgxInitInfo &initInfo) {
     assert(!device_ && !ngxParams_ && "Init already called");
 
     applicationPath_.assign(initInfo.applicationPath.begin(), initInfo.applicationPath.end());
+#ifdef DEBUG
+    std::cout << "NgxContext::init application path: " << initInfo.applicationPath << std::endl;
+    std::wcout << "NgxContext::init applicationPath_: " << applicationPath_ << std::endl;
+#endif
 
     NVSDK_NGX_FeatureCommonInfo info = {};
     // info.LoggingInfo.LoggingCallback     = &NGX_AppLogCallback;

@@ -26,6 +26,18 @@ layout(push_constant) uniform PushConstant {
     float speedDown;
     float minExposure;
     float maxExposure;
+    float manualExposure;
+    float exposureBias;
+    float whitePoint;
+    float saturation;
+    int toneMappingMethod;
+    int autoExposure;
+    int clampOutput;
+    int exposureMeteringMode;
+    float centerMeteringPercent;
+    float padding0;
+    float padding1;
+    float padding2;
 }
 pc;
 
@@ -35,9 +47,12 @@ void main() {
     uint total = 0u;
     for (uint i = 0u; i < NUM_BINS; ++i) total += gHist.bins[i];
 
+    float prev = expData.exposure;
+    if (isnan(prev) || isinf(prev) || prev <= 0.0) { prev = clamp(pc.manualExposure, pc.minExposure, pc.maxExposure); }
+
     if (total == 0u) {
         expData.avgLogLum = pc.log2Min;
-        expData.exposure = clamp(expData.exposure, pc.minExposure, pc.maxExposure);
+        expData.exposure = clamp(prev, pc.minExposure, pc.maxExposure);
         return;
     }
 
@@ -78,8 +93,6 @@ void main() {
     float avgLum = exp2(avgLogLum);
 
     float targetExposure = pc.middleGrey / max(avgLum, 1e-6);
-
-    float prev = expData.exposure;
     float speed = (targetExposure > prev) ? pc.speedUp : pc.speedDown;
     float k = 1.0 - exp(-pc.dt * speed);
     float adapted = mix(prev, targetExposure, clamp(k, 0.0, 1.0));

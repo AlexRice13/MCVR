@@ -5,13 +5,14 @@
 
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/modules/world/dlss/dlss_module.hpp"
-#include "core/render/modules/world/fsr_upscaler/upscaler_module.hpp"
+#include "core/render/modules/world/fsr_upscaler/fsr_upscaler_module.hpp"
 #include "core/render/modules/world/nrd/nrd_module.hpp"
 #include "core/render/modules/world/post_render/post_render_module.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/modules/world/svgf/svgf_module.hpp"
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
+#include "core/render/modules/world/xess_upscaler/xess_sr_module.hpp"
 
 #include <cstdlib>
 #include <iomanip>
@@ -77,32 +78,9 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     sharedImages_.resize(frameNum,
                          std::vector<std::shared_ptr<vk::DeviceLocalImage>>(blueprint->imageFormats_.size(), nullptr));
     contexts_.resize(frameNum);
-
-    // Determine initial render resolution from upscaler quality (if present)
     VkExtent2D extent = framework->swapchain()->vkExtent();
-    uint32_t renderWidth = extent.width;
-    uint32_t renderHeight = extent.height;
-    size_t upscalerIndex = std::numeric_limits<size_t>::max();
-    UpscalerModule::QualityMode upscalerMode = UpscalerModule::QualityMode::NativeAA;
-    for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
-        if (blueprint->moduleNames_[i] != UpscalerModule::NAME) continue;
-        upscalerIndex = i;
-        const auto &kvs = blueprint->attributeKVs_[i];
-        for (size_t k = 0; k + 1 < kvs.size(); k += 2) {
-            const std::string &key = kvs[k];
-            const std::string &value = kvs[k + 1];
-            if (UpscalerModule::isQualityModeAttributeKey(key)) {
-                UpscalerModule::parseQualityModeValue(value, upscalerMode);
-            }
-        }
-        if (upscalerMode != UpscalerModule::QualityMode::NativeAA) {
-            UpscalerModule::getRenderResolution(extent.width, extent.height, upscalerMode, &renderWidth, &renderHeight);
-        }
-        break;
-    }
 
     for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
-        // Keep the primary output at display resolution
         sharedImages_[frameIndex][0] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, extent.width, extent.height, 1, blueprint->imageFormats_[0],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
@@ -112,34 +90,19 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
         );
     }
 
-    // Pre-create outputs for modules before upscaler at render resolution
-    if (upscalerIndex != std::numeric_limits<size_t>::max() &&
-        (renderWidth != extent.width || renderHeight != extent.height)) {
-        std::set<uint32_t> renderIndices;
-        for (size_t i = 0; i < upscalerIndex; i++) {
-            for (uint32_t idx : blueprint->modulesOutputIndices_[i]) renderIndices.insert(idx);
-        }
-
-        for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
-            for (uint32_t idx : renderIndices) {
-                if (sharedImages_[frameIndex][idx] != nullptr) continue;
-                sharedImages_[frameIndex][idx] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, renderWidth, renderHeight, 1,
-                    blueprint->imageFormats_[idx],
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
-                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
-                );
-            }
-        }
-    }
-
     for (int i = blueprint->moduleNames_.size() - 1; i >= 0; i--) {
+#ifdef DEBUG
+        std::cout << "Is " << blueprint->moduleNames_[i] << " exist? "
+                  << (Pipeline::worldModuleConstructors.find(blueprint->moduleNames_[i]) !=
+                      Pipeline::worldModuleConstructors.end())
+                  << std::endl;
+#endif
         worldModules_[i] = Pipeline::worldModuleConstructors[blueprint->moduleNames_[i]](framework, shared_from_this());
 
         auto &moduleInputIndices = blueprint->modulesInputIndices_[i];
         auto &moduleOutputIndices = blueprint->modulesOutputIndices_[i];
+
+        worldModules_[i]->setAttributes(blueprint->attributeCounts_[i], blueprint->attributeKVs_[i]);
 
         for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
             { // output
@@ -173,8 +136,6 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                 }
             }
         }
-
-        worldModules_[i]->setAttributes(blueprint->attributeCounts_[i], blueprint->attributeKVs_[i]);
 
         worldModules_[i]->build();
     }
@@ -285,6 +246,12 @@ std::map<std::string, std::pair<uint32_t, uint32_t>> Pipeline::worldModuleInOutI
 std::map<std::string, std::function<void()>> Pipeline::worldModuleStaticPreCloser{};
 
 void Pipeline::collectWorldModules() {
+    worldModuleConstructors.clear();
+    worldModuleInOutImageNums.clear();
+    worldModuleStaticPreCloser.clear();
+
+    auto framework = Renderer::instance().framework();
+
     worldModuleConstructors.insert(std::make_pair(
         RayTracingModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
             return RayTracingModule::create(framework, worldPipeline);
@@ -319,11 +286,26 @@ void Pipeline::collectWorldModules() {
                                                                         TemporalAccumulationModule::outputImageNum)));
 
     worldModuleConstructors.insert(std::make_pair(
-        UpscalerModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-            return UpscalerModule::create(framework, worldPipeline);
+        FSRUpscalerModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+            return FSRUpscalerModule::create(framework, worldPipeline);
         }));
     worldModuleInOutImageNums.insert(std::make_pair(
-        UpscalerModule::NAME, std::make_pair(UpscalerModule::inputImageNum, UpscalerModule::outputImageNum)));
+        FSRUpscalerModule::NAME, std::make_pair(FSRUpscalerModule::inputImageNum, FSRUpscalerModule::outputImageNum)));
+
+#ifdef MCVR_ENABLE_XESS
+    if (framework != nullptr && framework->device() != nullptr &&
+        framework->device()->isXessDeviceExtensionsCompatible()) {
+        worldModuleConstructors.insert(std::make_pair(
+            XessSrModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+                return XessSrModule::create(framework, worldPipeline);
+            }));
+        worldModuleInOutImageNums.insert(std::make_pair(
+            XessSrModule::NAME, std::make_pair(XessSrModule::inputImageNum, XessSrModule::outputImageNum)));
+    } else {
+        std::cerr << "[Pipeline] xess module skipped: incompatible instance/device extension requirements."
+                  << std::endl;
+    }
+#endif
 
     worldModuleConstructors.insert(
         std::make_pair(ToneMappingModule::NAME,
@@ -333,15 +315,24 @@ void Pipeline::collectWorldModules() {
     worldModuleInOutImageNums.insert(std::make_pair(
         ToneMappingModule::NAME, std::make_pair(ToneMappingModule::inputImageNum, ToneMappingModule::outputImageNum)));
 
-    bool result = DLSSModule::initNGXContext();
-    if (result) {
-        worldModuleConstructors.insert(std::make_pair(
-            DLSSModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-                return DLSSModule::create(framework, worldPipeline);
-            }));
-        worldModuleInOutImageNums.insert(
-            std::make_pair(DLSSModule::NAME, std::make_pair(DLSSModule::inputImageNum, DLSSModule::outputImageNum)));
-        worldModuleStaticPreCloser.insert(std::make_pair(DLSSModule::NAME, DLSSModule::deinitNGXContext));
+    if (framework != nullptr && framework->device() != nullptr &&
+        framework->device()->isDlssDeviceExtensionsCompatible()) {
+        bool result = DLSSModule::initNGXContext();
+        if (result) {
+            worldModuleConstructors.insert(
+                std::make_pair(DLSSModule::NAME,
+                               [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+                                   return DLSSModule::create(framework, worldPipeline);
+                               }));
+            worldModuleInOutImageNums.insert(std::make_pair(
+                DLSSModule::NAME, std::make_pair(DLSSModule::inputImageNum, DLSSModule::outputImageNum)));
+            worldModuleStaticPreCloser.insert(std::make_pair(DLSSModule::NAME, DLSSModule::deinitNGXContext));
+        } else {
+            std::cerr << "[Pipeline] dlss module skipped: NGX initialization/query failed." << std::endl;
+        }
+    } else {
+        std::cerr << "[Pipeline] dlss module skipped: incompatible instance/device extension requirements."
+                  << std::endl;
     }
 
     worldModuleConstructors.insert(
@@ -363,7 +354,11 @@ void Pipeline::collectWorldModules() {
     // TODO: invoke extension's collection
 }
 
-Pipeline::Pipeline() {}
+Pipeline::Pipeline() {
+#ifdef DEBUG
+    std::cout << "Pipeline init" << std::endl;
+#endif
+}
 
 Pipeline::~Pipeline() {
 #ifdef DEBUG

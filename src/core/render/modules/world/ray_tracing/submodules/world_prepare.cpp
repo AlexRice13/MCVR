@@ -37,8 +37,11 @@ WorldPrepareContext::WorldPrepareContext(std::shared_ptr<FrameworkContext> frame
 void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
                                        std::vector<uint64_t> &vertexBufferAddrs,
                                        std::vector<uint64_t> &indexBufferAddrs,
+                                       std::vector<uint64_t> &positionBufferAddrs,
+                                       std::vector<uint64_t> &materialBufferAddrs,
                                        std::vector<uint64_t> &lastVertexBufferAddrs,
                                        std::vector<uint64_t> &lastIndexBufferAddrs,
+                                       std::vector<uint64_t> &lastPositionBufferAddrs,
                                        std::vector<glm::mat4> &lastObjToWorldMats) {
     auto context = frameworkContext.lock();
     auto framework = context->framework.lock();
@@ -66,6 +69,18 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data());
 
+    positionBufferAddr = vk::DeviceLocalBuffer::create(
+        vma, device, positionBufferAddrs.size() * sizeof(uint64_t),
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    positionBufferAddr->uploadToStagingBuffer(positionBufferAddrs.data());
+
+    materialBufferAddr = vk::DeviceLocalBuffer::create(
+        vma, device, materialBufferAddrs.size() * sizeof(uint64_t),
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    materialBufferAddr->uploadToStagingBuffer(materialBufferAddrs.data());
+
     lastVertexBufferAddr = vk::DeviceLocalBuffer::create(
         vma, device, lastVertexBufferAddrs.size() * sizeof(uint64_t),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
@@ -78,6 +93,12 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data());
 
+    lastPositionBufferAddr = vk::DeviceLocalBuffer::create(
+        vma, device, lastPositionBufferAddrs.size() * sizeof(uint64_t),
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    lastPositionBufferAddr->uploadToStagingBuffer(lastPositionBufferAddrs.data());
+
     lastObjToWorldMat = vk::DeviceLocalBuffer::create(
         vma, device, lastObjToWorldMats.size() * sizeof(glm::mat4),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
@@ -88,8 +109,11 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         blasOffsetsBuffer,
         vertexBufferAddr,
         indexBufferAddr,
+        positionBufferAddr,
+        materialBufferAddr,
         lastVertexBufferAddr,
         lastIndexBufferAddr,
+        lastPositionBufferAddr,
         lastObjToWorldMat,
     }};
 
@@ -128,7 +152,12 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
 }
 
 void WorldPrepareContext::render() {
-    auto module = worldPrepare.lock();
+    auto rayTracingContext = rayTracingModuleContext.lock();
+    auto rayTracingModule = rayTracingContext != nullptr ? rayTracingContext->rayTracingModule.lock() : nullptr;
+    auto worldPrepare1 = worldPrepare.lock();
+    if (rayTracingModule == nullptr) { return; }
+    if (worldPrepare1 == nullptr) { return; }
+    const uint32_t shadowHitGroupIndex = rayTracingModule->shadowHitGroupIndex();
 
     std::shared_ptr<Framework> framework = Renderer::instance().framework();
     std::shared_ptr<FrameworkContext> context = frameworkContext.lock();
@@ -165,9 +194,11 @@ void WorldPrepareContext::render() {
 
     uint32_t blasAccu = 0, blasGroupAccu = 0;
     std::vector<uint32_t> blasOffset;
-    std::vector<uint32_t> geometryTypes;
+    std::vector<uint32_t> hitGroupIndices;
     std::vector<uint64_t> vertexBufferAddrs, indexBufferAddrs;
+    std::vector<uint64_t> positionBufferAddrs, materialBufferAddrs;
     std::vector<uint64_t> lastVertexBufferAddrs, lastIndexBufferAddrs;
+    std::vector<uint64_t> lastPositionBufferAddrs;
     std::vector<glm::mat4> lastObjToWorldMats;
 
     tlasBuilder = vk::TLASBuilder::create();
@@ -179,16 +210,15 @@ void WorldPrepareContext::render() {
         auto entityBatch = entities->entityBatch();
 
         if (entityBatch != nullptr) {
-            static std::queue<std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>>>
-                previousEntityRenderDataBatches;
-            static std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> emptyMap;
+            std::unique_lock<std::recursive_mutex> entityHistoryLock(worldPrepare1->entityRenderDataBatchesMtx_);
+            auto &previousEntityRenderDataBatches = worldPrepare1->previousEntityRenderDataBatches_;
+            auto &emptyEntityRenderDataBatch = worldPrepare1->emptyEntityRenderDataBatch_;
 
-            std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> &previousEntityRenderDataBatch =
-                previousEntityRenderDataBatches.empty() ? emptyMap : previousEntityRenderDataBatches.back();
+            auto &previousEntityRenderDataBatch =
+                previousEntityRenderDataBatches.empty() ? emptyEntityRenderDataBatch : previousEntityRenderDataBatches.back();
             if (previousEntityRenderDataBatches.size() > Renderer::instance().framework()->swapchain()->imageCount())
                 previousEntityRenderDataBatches.pop();
-            std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> &currentEntityRenderDataBatch =
-                previousEntityRenderDataBatches.emplace();
+            auto &currentEntityRenderDataBatch = previousEntityRenderDataBatches.emplace();
 
             auto worldUniformBuffer = Renderer::instance().buffers()->worldUniformBuffer();
             auto ubo = static_cast<vk::Data::WorldUBO *>(worldUniformBuffer->mappedPtr());
@@ -223,26 +253,34 @@ void WorldPrepareContext::render() {
                         };
                     }
 
-                    instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rtFlag, blasGroupAccu, flags,
+                    instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rayTracingFlag, blasGroupAccu, flags,
                                                    entities1[i]->blas);
                 } else {
                     // auto &prebuiltBLAS =
                     //     Renderer::instance().framework()->prebuiltBLASs()[entityRenderData->prebuiltBLAS];
                     // transform = prebuiltBLAS.align(*entityRenderData->vertices, *entityRenderData->indices);
 
-                    // instanceBuilder.defineInstance(transform, blasIndex, entityRenderData->rtFlag, blasGroupAccu,
+                    // instanceBuilder.defineInstance(transform, blasIndex, entityRenderData->rayTracingFlag, blasGroupAccu,
                     // flags,
                     //                                prebuiltBLAS.blas);
                     throw std::runtime_error("prebuilt blas not implemented yet!");
                 }
 
-                geometryTypes.push_back(World::GeometryTypes::SHADOW);
-                geometryTypes.insert(geometryTypes.end(), entities1[i]->geometryTypes->begin(),
-                                     entities1[i]->geometryTypes->end());
+                hitGroupIndices.push_back(shadowHitGroupIndex);
+                for (int j = 0; j < entities1[i]->geometryCount; j++) {
+                    const std::string &groupName =
+                        entities1[i]->geometryGroupNames != nullptr &&
+                                j < static_cast<int>(entities1[i]->geometryGroupNames->size())
+                            ? (*entities1[i]->geometryGroupNames)[j]
+                            : "default";
+                    hitGroupIndices.push_back(rayTracingModule->hitGroupIndexForName(groupName));
+                }
 
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
                     vertexBufferAddrs.push_back((*entities1[i]->vertexBufferAddresses)[j]);
                     indexBufferAddrs.push_back((*entities1[i]->indexBufferAddresses)[j]);
+                    positionBufferAddrs.push_back((*entities1[i]->positionBufferAddresses)[j]);
+                    materialBufferAddrs.push_back((*entities1[i]->materialBufferAddresses)[j]);
                 }
 
                 // store current render data
@@ -269,15 +307,19 @@ void WorldPrepareContext::render() {
                                         (*previousEntityRenderData->vertexBufferAddresses)[j]);
                                     lastIndexBufferAddrs.push_back(
                                         (*previousEntityRenderData->indexBufferAddresses)[j]);
+                                    lastPositionBufferAddrs.push_back(
+                                        (*previousEntityRenderData->positionBufferAddresses)[j]);
                                 } else {
                                     lastVertexBufferAddrs.push_back(0);
                                     lastIndexBufferAddrs.push_back(0);
+                                    lastPositionBufferAddrs.push_back(0);
                                 }
                             }
                         } else {
                             for (int j = 0; j < entities1[i]->geometryCount; j++) {
                                 lastVertexBufferAddrs.push_back(0);
                                 lastIndexBufferAddrs.push_back(0);
+                                lastPositionBufferAddrs.push_back(0);
                             }
                         }
 
@@ -290,6 +332,7 @@ void WorldPrepareContext::render() {
                         for (int j = 0; j < entities1[i]->geometryCount; j++) {
                             lastVertexBufferAddrs.push_back(0);
                             lastIndexBufferAddrs.push_back(0);
+                            lastPositionBufferAddrs.push_back(0);
                         }
                     }
                     lastObjToWorldMats.push_back(lastObjToWorldMat);
@@ -319,14 +362,23 @@ void WorldPrepareContext::render() {
 
             instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunk1->blas);
 
-            geometryTypes.push_back(World::GeometryTypes::SHADOW);
-            geometryTypes.insert(geometryTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
+            hitGroupIndices.push_back(shadowHitGroupIndex);
+            for (int j = 0; j < chunk1->geometryCount; j++) {
+                const std::string &groupName =
+                    chunk1->geometryGroupNames != nullptr && j < static_cast<int>(chunk1->geometryGroupNames->size())
+                        ? (*chunk1->geometryGroupNames)[j]
+                        : "default";
+                hitGroupIndices.push_back(rayTracingModule->hitGroupIndexForName(groupName));
+            }
 
             for (int j = 0; j < chunk1->geometryCount; j++) {
                 vertexBufferAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
                 indexBufferAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
+                positionBufferAddrs.push_back((*chunk1->positionBuffers)[j]->bufferAddress());
+                materialBufferAddrs.push_back((*chunk1->materialBuffers)[j]->bufferAddress());
                 lastVertexBufferAddrs.push_back(0);
                 lastIndexBufferAddrs.push_back(0);
+                lastPositionBufferAddrs.push_back(0);
             }
 
             // read (fake, since chunk is not moving) previous render data
@@ -365,8 +417,9 @@ void WorldPrepareContext::render() {
         .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
     }});
 
-    rayTracingModuleContext.lock()->sbt->setupHitSBT(geometryTypes);
+    rayTracingContext->sharcUpdateSbt->setupHitSBT(hitGroupIndices);
+    rayTracingContext->sharcQuerySbt->setupHitSBT(hitGroupIndices);
 
-    uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, lastVertexBufferAddrs, lastIndexBufferAddrs,
-                 lastObjToWorldMats);
+    uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, positionBufferAddrs, materialBufferAddrs,
+                 lastVertexBufferAddrs, lastIndexBufferAddrs, lastPositionBufferAddrs, lastObjToWorldMats);
 }

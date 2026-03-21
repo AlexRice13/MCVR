@@ -36,4 +36,5 @@ glm::dvec3 World::getCameraPos() {
 void World::close() {
     shouldRenderWorld_ = false;
     chunks_->close();
+    entities_->close();
 }

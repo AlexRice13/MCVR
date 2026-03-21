@@ -31,6 +31,7 @@ bool DLSSModule::initNGXContext() {
     }
 
     if (ngxContext_->queryDlssRRAvailable() != NVSDK_NGX_Result_Success) {
+        ngxContext_->deinit();
         ngxContext_ = nullptr;
         return false;
     }

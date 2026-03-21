@@ -1,0 +1,131 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "util/alpha_mode.glsl"
+#include "util/labpbr.glsl"
+#include "util/random.glsl"
+#include "util/ray.glsl"
+#include "util/util.glsl"
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 3) readonly buffer IndexBufferAddr {
+    uint64_t addrs[];
+}
+indexBufferAddrs;
+
+layout(set = 1, binding = 9) readonly buffer TextureMappingBuffer {
+    TextureMapping mapping;
+};
+
+layout(set = 2, binding = 0) uniform Uniform {
+    WorldUBO ubo;
+};
+
+layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
+    uint indices[];
+}
+indexBuffer;
+
+#include "util/vertex.glsl"
+
+layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
+hitAttributeEXT vec2 attribs;
+
+void main() {
+    uint instanceID = gl_InstanceCustomIndexEXT;
+    uint geometryID = gl_GeometryIndexEXT;
+    uint geometryBufferIndex = getGeometryBufferIndex(instanceID, geometryID);
+
+    uint i0, i1, i2;
+    MaterialVertex m0, m1, m2;
+    loadTriangleIndices(geometryBufferIndex, gl_PrimitiveID, i0, i1, i2);
+    loadTriangleMaterial(geometryBufferIndex, i0, i1, i2, m0, m1, m2);
+
+    vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
+    uint packedData = m0.packedData;
+    uint textureID = m0.textureID;
+    uint alphaMode = getAlphaMode(packedData);
+
+    vec4 colorLayer =
+        hasColorLayer(packedData) ?
+            (baryCoords.x * m0.colorLayer + baryCoords.y * m1.colorLayer + baryCoords.z * m2.colorLayer) :
+            vec4(1.0);
+
+    vec4 albedo = vec4(1.0);
+    vec2 textureUV = vec2(0.0);
+
+    if (hasTexture(packedData)) {
+        textureUV = baryCoords.x * m0.textureUV + baryCoords.y * m1.textureUV + baryCoords.z * m2.textureUV;
+        albedo = sampleTexture(textures[nonuniformEXT(textureID)], textureUV, false);
+    }
+
+    vec4 shadedAlbedo = albedo * colorLayer;
+    float alpha = resolveSurfaceAlpha(shadedAlbedo.a, alphaMode);
+    if (alpha < 0.05) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    if (shadowRay.insideBoat > 0u && hasTexture(packedData)) {
+        int flagTextureID = mapping.entries[textureID].flag;
+        if (flagTextureID >= 0) {
+            ivec4 flags =
+                ivec4(round(sampleTexture(textures[nonuniformEXT(flagTextureID)], textureUV, 0.0, false) * 255.0));
+            if ((flags.r & 0x1) > 0) {
+                ignoreIntersectionEXT;
+                return;
+            }
+        }
+    }
+
+    if (alphaMode != ALPHA_MODE_TRANSPARENT) {
+        terminateRayEXT;
+        return;
+    }
+
+    vec4 specular = vec4(0.0);
+    if (hasTexture(packedData)) {
+        int specularTextureID = mapping.entries[textureID].specular;
+        if (specularTextureID >= 0) {
+            specular = sampleTexture(textures[nonuniformEXT(specularTextureID)], textureUV, false);
+        }
+    }
+
+    vec2 glintUV = baryCoords.x * m0.glintUV + baryCoords.y * m1.glintUV + baryCoords.z * m2.glintUV;
+    glintUV = (ubo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
+    vec3 glint = hasGlint(packedData) ? sampleTexture(textures[nonuniformEXT(m0.glintTexture)], glintUV, false).rgb :
+                                          vec3(0.0);
+    glint *= glint;
+
+    vec3 tint = shadedAlbedo.rgb;
+    if (hasOverlay(packedData)) {
+        vec4 overlayColor = sampleTexture(textures[nonuniformEXT(ubo.overlayTextureID)], m0.overlayUV, 0, false);
+        tint = mix(overlayColor.rgb, tint, overlayColor.a) + glint;
+    } else {
+        tint += glint;
+    }
+    shadedAlbedo.a = alpha;
+
+    LabPBRMat mat = convertLabPBRMaterial(shadedAlbedo, specular, vec4(0.0));
+
+    if (mat.transmission > 0.0 || alpha < 0.95) {
+        vec3 shadowTransmission = clamp(mix(vec3(1.0), tint, alpha), vec3(0.0), vec3(1.0));
+        shadowRay.throughput *= shadowTransmission;
+        ignoreIntersectionEXT;
+    } else {
+        terminateRayEXT;
+    }
+}

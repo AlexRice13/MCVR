@@ -33,7 +33,7 @@ void Textures::resetFrame() {
 }
 
 uint32_t Textures::allocateTexture() {
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
     textures_.emplace(std::make_pair(nextID, nullptr));
     samplers.emplace(std::make_pair(nextID, nullptr));
@@ -44,7 +44,7 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
     auto device = Renderer::instance().framework()->device();
     auto vma = Renderer::instance().framework()->vma();
 
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
     auto textureIter = textures_.find(id);
     if (textureIter == textures_.end()) {
@@ -54,8 +54,16 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
 
     auto framework = Renderer::instance().framework();
     framework->gc().collect(textures_[id]);
+#ifdef DEBUG
+    if (textures_[id] != nullptr) { std::cout << "Textrue reinitialized: " << id << std::endl; }
+#endif
     textures_[id] = vk::DeviceLocalImage::create(device, vma, false, maxLevel, width, height, 1, format,
-                                                 VK_IMAGE_USAGE_SAMPLED_BIT, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+                                                 VK_IMAGE_USAGE_SAMPLED_BIT, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0
+#ifdef DEBUG
+                                                 ,
+                                                 "Texture " + std::to_string(id)
+#endif
+    );
 
     auto samplerIter = samplers.find(id);
     if (samplerIter == samplers.end()) {
@@ -72,7 +80,7 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
 void Textures::setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipmapMode mipmapMode) {
     auto device = Renderer::instance().framework()->device();
 
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
     auto samplerIter = samplers.find(id);
     if (samplerIter == samplers.end()) {
@@ -93,7 +101,7 @@ void Textures::setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipm
 void Textures::setAddressMode(uint32_t id, VkSamplerAddressMode addressMode) {
     auto device = Renderer::instance().framework()->device();
 
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
     auto samplerIter = samplers.find(id);
     if (samplerIter == samplers.end()) {
@@ -123,7 +131,7 @@ void Textures::queueUpload(uint8_t *srcPointer,
                            uint32_t width,
                            uint32_t height,
                            uint32_t level) {
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
     auto framework = Renderer::instance().framework();
 
@@ -153,7 +161,12 @@ void Textures::queueUpload(uint8_t *srcPointer,
     VkBufferImageCopy region = {};
     region.bufferRowLength = srcRowPixels;
     region.bufferOffset = offset + srcOffsetY * srcRowPixels * bytePerPixel + srcOffsetX * bytePerPixel;
-    region.imageSubresource = vk::wholeColorSubresourceLayers;
+    region.imageSubresource = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .mipLevel = 0,
+        .baseArrayLayer = 0,
+        .layerCount = 1, // avoid VK_REMAINING_ARRAY_LAYERS to get rid of maintaince5
+    };
     region.imageSubresource.mipLevel = level;
     region.imageExtent = {width, height, 1};
     region.imageOffset = {dstOffsetX, dstOffsetY, 0};
@@ -166,7 +179,7 @@ void Textures::queueUpload(uint8_t *srcPointer,
 }
 
 void Textures::performQueuedUpload() {
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
     std::shared_ptr<vk::CommandBuffer> cmdBuffer =
         Renderer::instance().framework()->safeAcquireCurrentContext()->uploadCommandBuffer;
@@ -256,7 +269,7 @@ void Textures::performQueuedUpload() {
 void Textures::bindAllTextures() {
     auto device = Renderer::instance().framework()->device();
 
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    std::scoped_lock lck(mtx_);
 
     for (const auto &[id, texture] : textures_) {
         if (texture == nullptr) {

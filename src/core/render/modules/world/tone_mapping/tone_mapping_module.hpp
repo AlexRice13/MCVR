@@ -5,6 +5,7 @@
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 #include <chrono>
+#include <cstdint>
 
 #include "core/render/modules/world/world_module.hpp"
 
@@ -22,18 +23,44 @@ struct ToneMappingModuleExposureData {
     float padding1;
 };
 
+enum ToneMappingMethod : int32_t {
+    TONE_MAPPING_METHOD_PBR_NEUTRAL = 0,
+    TONE_MAPPING_METHOD_REINHARD = 1,
+    TONE_MAPPING_METHOD_REINHARD_WHITE_POINT = 2,
+    TONE_MAPPING_METHOD_ACES_FITTED = 3,
+    TONE_MAPPING_METHOD_ACES_FITTED_WHITE_POINT = 4,
+    TONE_MAPPING_METHOD_UNCHARTED2 = 5,
+};
+
+enum ToneMappingExposureMeteringMode : int32_t {
+    TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL = 0,
+    TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER = 1,
+};
+
 struct ToneMappingModulePushConstant {
-    float log2Min;     // 例如 -12
-    float log2Max;     // 例如 +4
-    float epsilon;     // 例如 1e-6
-    float lowPercent;  // 例如 0.005 (0.5%)
-    float highPercent; // 例如 0.99  (99%)
-    float middleGrey;  // 例如 0.18
-    float dt;          // 本帧 delta time（秒）
-    float speedUp;     // 变亮适应速度（1/秒），例如 3.0
-    float speedDown;   // 变暗适应速度（1/秒），例如 1.0
-    float minExposure; // 可选 clamp，例如 0.0001
-    float maxExposure; // 可选 clamp，例如 10000.0
+    float log2Min;
+    float log2Max;
+    float epsilon;
+    float lowPercent;
+    float highPercent;
+    float middleGrey;
+    float dt;
+    float speedUp;
+    float speedDown;
+    float minExposure;
+    float maxExposure;
+    float manualExposure;
+    float exposureBias;
+    float whitePoint;
+    float saturation;
+    int toneMappingMethod;
+    int autoExposure;
+    int clampOutput;
+    int exposureMeteringMode;
+    float centerMeteringPercent;
+    float padding0;
+    float padding1;
+    float padding2;
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {
@@ -99,9 +126,28 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     std::shared_ptr<vk::GraphicsPipeline> pipeline_;
     std::vector<std::shared_ptr<vk::Sampler>> samplers_;
 
-    float middleGrey_ = 0.18;
-    float speedUp_ = 3.0;
-    float speedDown_ = 3.0;
+    float middleGrey_ = 0.18f;
+    float speedUp_ = 3.0f;
+    float speedDown_ = 3.0f;
+
+    float log2Min_ = -12.0f;
+    float log2Max_ = 4.0f;
+    float epsilon_ = 1e-6f;
+    float lowPercent_ = 0.005f;
+    float highPercent_ = 0.99f;
+    float minExposure_ = 1e-4f;
+    float maxExposure_ = 1.2f;
+
+    float manualExposure_ = 1.0f;
+    float exposureBias_ = 0.0f;
+    float whitePoint_ = 11.2f;
+    float saturation_ = 1.0f;
+
+    int toneMappingMethod_ = TONE_MAPPING_METHOD_ACES_FITTED;
+    bool autoExposure_ = true;
+    bool clampOutput_ = true;
+    int exposureMeteringMode_ = TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL;
+    float centerMeteringPercent_ = 20.0f;
 
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> ldrImages_;
@@ -110,7 +156,7 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
 
     std::chrono::time_point<std::chrono::high_resolution_clock> lastTimePoint_;
 
-    uint32_t width_, height_;
+    uint32_t width_ = 0, height_ = 0;
 };
 
 struct ToneMappingModuleContext : public WorldModuleContext, SharedObject<ToneMappingModuleContext> {

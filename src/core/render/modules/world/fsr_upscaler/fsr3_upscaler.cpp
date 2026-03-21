@@ -5,7 +5,6 @@
 #include <iostream>
 
 #ifdef MCVR_ENABLE_FFX_UPSCALER
-// Prevent FFX API from trying to export symbols from our own DLL
 #    ifdef _WIN32
 #        include <windows.h>
 #        define FFX_API_ENTRY
@@ -23,7 +22,6 @@
 
 #    include <volk.h>
 
-// Helper to convert quality mode to FFX quality mode
 static uint32_t toFFXQualityMode(mcvr::UpscalerQualityMode mode) {
     switch (mode) {
         case mcvr::UpscalerQualityMode::NativeAA: return FFX_UPSCALE_QUALITY_MODE_NATIVEAA;
@@ -32,6 +30,19 @@ static uint32_t toFFXQualityMode(mcvr::UpscalerQualityMode mode) {
         case mcvr::UpscalerQualityMode::Performance: return FFX_UPSCALE_QUALITY_MODE_PERFORMANCE;
         case mcvr::UpscalerQualityMode::UltraPerformance: return FFX_UPSCALE_QUALITY_MODE_ULTRA_PERFORMANCE;
         default: return FFX_UPSCALE_QUALITY_MODE_QUALITY;
+    }
+}
+
+static const char *toFFXReturnCodeString(ffx::ReturnCode code) {
+    switch (code) {
+        case ffx::ReturnCode::Ok: return "Ok";
+        case ffx::ReturnCode::Error: return "Error";
+        case ffx::ReturnCode::ErrorUnknownDesctype: return "ErrorUnknownDesctype";
+        case ffx::ReturnCode::ErrorRuntimeError: return "ErrorRuntimeError";
+        case ffx::ReturnCode::ErrorNoProvider: return "ErrorNoProvider";
+        case ffx::ReturnCode::ErrorMemory: return "ErrorMemory";
+        case ffx::ReturnCode::ErrorParameter: return "ErrorParameter";
+        default: return "Unknown";
     }
 }
 #endif // MCVR_ENABLE_FFX_UPSCALER
@@ -143,8 +154,9 @@ bool FSR3Upscaler::createContext() {
     std::flush(std::cerr);
 #    endif
 
-    // Query for available FSR3 versions
+    // Query available providers for debug visibility, but let FFX choose the best one.
     std::vector<uint64_t> fsrVersionIds;
+    std::vector<const char *> fsrVersionNames;
     {
         ffx::QueryDescGetVersions versionQuery{};
         versionQuery.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
@@ -162,15 +174,20 @@ bool FSR3Upscaler::createContext() {
 
         if (versionCount > 0) {
             fsrVersionIds.resize(versionCount);
+            fsrVersionNames.resize(versionCount);
             versionQuery.versionIds = fsrVersionIds.data();
-            versionQuery.versionNames = nullptr;
+            versionQuery.versionNames = fsrVersionNames.data();
             versionQuery.outputCount = &versionCount;
             ffxQuery(nullptr, &versionQuery.header);
 
 #    ifdef DEBUG
             std::cout << "FSR3: Found " << versionCount << " available FSR version(s):" << std::endl;
             for (uint64_t i = 0; i < versionCount; ++i) {
-                std::cout << "  Version[" << i << "] = 0x" << std::hex << fsrVersionIds[i] << std::dec << std::endl;
+                std::cout << "  Version[" << i << "] = 0x" << std::hex << fsrVersionIds[i] << std::dec;
+                if (i < fsrVersionNames.size() && fsrVersionNames[i] != nullptr) {
+                    std::cout << " (" << fsrVersionNames[i] << ")";
+                }
+                std::cout << std::endl;
             }
 #    endif
 
@@ -254,81 +271,65 @@ bool FSR3Upscaler::createContext() {
     if (m_config.hdr) { createFsr.flags |= FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE; }
     if (m_config.depthInfinite) { createFsr.flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE; }
     if (m_config.depthInverted) { createFsr.flags |= FFX_UPSCALE_ENABLE_DEPTH_INVERTED; }
-    // Motion vectors are de-jittered in our prepare pass; do not enable FSR jitter cancellation
     if (m_config.autoExposure) { createFsr.flags |= FFX_UPSCALE_ENABLE_AUTO_EXPOSURE; }
 
     createFsr.fpMessage = mcvr::fsr::messageCallback;
 
-    ffx::ReturnCode retCode =
-        ffx::CreateContext(reinterpret_cast<ffx::Context &>(m_fsrContext), nullptr, createFsr, backendDesc);
+    m_fsrContext = nullptr;
+    ffx::ReturnCode retCode = ffx::CreateContext(reinterpret_cast<ffx::Context &>(m_fsrContext), nullptr, createFsr,
+                                                 backendDesc);
 
-    if (retCode != ffx::ReturnCode::Ok && !fsrVersionIds.empty()) {
-        std::cerr << "FSR3: Initial CreateContext failed with error: " << static_cast<uint32_t>(retCode) << std::endl;
-#    ifdef DEBUG
-        std::cerr << "FSR3: Trying alternative shader versions..." << std::endl;
-#    endif
-
-        uint64_t bestVersionId = fsrVersionIds[0];
-        uint32_t bestMajor = 0xFFFFFFFF;
-        uint32_t bestIndex = 0;
-
-        for (uint32_t i = 0; i < fsrVersionIds.size(); ++i) {
-            uint32_t version = static_cast<uint32_t>(fsrVersionIds[i] & 0xFFFFFFFFu);
-            uint32_t major = version >> 22;
-            if (major < bestMajor) {
-                bestMajor = major;
-                bestVersionId = fsrVersionIds[i];
-                bestIndex = i;
-            }
+    if (retCode == ffx::ReturnCode::Ok) {
+        ffx::InitHelper<ffxQueryGetProviderVersion> providerQuery{};
+        if (ffx::Query(reinterpret_cast<ffx::Context &>(m_fsrContext), providerQuery) == ffx::ReturnCode::Ok &&
+            providerQuery.versionName != nullptr) {
+            std::cout << "FSR3: Active provider = " << providerQuery.versionName << " (0x" << std::hex
+                      << providerQuery.versionId << std::dec << ")" << std::endl;
         }
-
 #    ifdef DEBUG
-        std::cerr << "FSR3: Trying version[" << bestIndex << "] = 0x" << std::hex << bestVersionId << std::dec
-                  << std::endl;
+        std::cout << "FSR3: CreateContext succeeded!" << std::endl;
 #    endif
-
-        ffx::CreateContextDescOverrideVersion versionOverride{};
-        versionOverride.versionId = bestVersionId;
-        retCode = ffx::CreateContext(reinterpret_cast<ffx::Context &>(m_fsrContext), nullptr, createFsr, backendDesc,
-                                     versionOverride);
-
-        if (retCode == ffx::ReturnCode::Ok) {
-#    ifdef DEBUG
-            std::cout << "FSR3: CreateContext succeeded with version override!" << std::endl;
-#    endif
-        }
+        m_contextCreated = true;
+        return true;
     }
 
-    if (retCode != ffx::ReturnCode::Ok) {
-        std::cerr << "FSR3: CreateContext failed with error: " << static_cast<uint32_t>(retCode) << std::endl;
+    std::cerr << "FSR3: CreateContext failed with error: " << toFFXReturnCodeString(retCode) << " ("
+              << static_cast<uint32_t>(retCode) << ")" << std::endl;
 
-        std::cerr << "FSR3: Device=" << m_device << std::endl;
-        std::cerr << "FSR3: PhysicalDevice=" << m_physicalDevice << std::endl;
+    std::cerr << "FSR3: Device=" << m_device << std::endl;
+    std::cerr << "FSR3: PhysicalDevice=" << m_physicalDevice << std::endl;
 
-        if (retCode == ffx::ReturnCode::ErrorRuntimeError) {
-            std::cerr << "FSR3: Runtime error - check Vulkan validation layers for details" << std::endl;
-        }
-
-        m_fsrContext = nullptr;
-        return false;
+    if (retCode == ffx::ReturnCode::ErrorRuntimeError) {
+        std::cerr << "FSR3: Runtime error - check Vulkan validation layers for details" << std::endl;
     }
 
-#    ifdef DEBUG
-    std::cout << "FSR3: CreateContext succeeded!" << std::endl;
-#    endif
-
-    m_contextCreated = true;
-    return true;
+    m_fsrContext = nullptr;
+    m_contextCreated = false;
+    return false;
 #endif
 }
 
 void FSR3Upscaler::destroyContext() {
 #ifdef MCVR_ENABLE_FFX_UPSCALER
-    if (m_contextCreated && m_fsrContext) {
-        ffx::DestroyContext(reinterpret_cast<ffx::Context &>(m_fsrContext));
-        m_fsrContext = nullptr;
+    if (!m_fsrContext) {
         m_contextCreated = false;
+        return;
     }
+
+    if (m_device != VK_NULL_HANDLE) { vkDeviceWaitIdle(m_device); }
+
+    ffx::ReturnCode result = ffx::DestroyContext(reinterpret_cast<ffx::Context &>(m_fsrContext));
+    if (result != ffx::ReturnCode::Ok) {
+        if (m_device != VK_NULL_HANDLE) { vkDeviceWaitIdle(m_device); }
+        result = ffx::DestroyContext(reinterpret_cast<ffx::Context &>(m_fsrContext));
+    }
+    if (result != ffx::ReturnCode::Ok) {
+        std::cerr << "FSR3: DestroyContext failed with error: " << toFFXReturnCodeString(result) << " ("
+                  << static_cast<uint32_t>(result) << ")" << std::endl;
+    }
+
+    m_fsrContext = nullptr;
+    m_contextCreated = false;
 #endif
 }
 
@@ -350,14 +351,15 @@ void FSR3Upscaler::dispatch(const UpscalerInput &input) {
 #    ifdef DEBUG
         std::cout << "[FSR3] dispatch: render=" << input.renderWidth << "x" << input.renderHeight
                   << " display=" << input.displayWidth << "x" << input.displayHeight
+                  << " colorFmt=" << static_cast<int>(input.colorFormat)
                   << " depthFmt=" << static_cast<int>(input.depthFormat)
+                  << " mvFmt=" << static_cast<int>(input.motionVectorFormat)
+                  << " outputFmt=" << static_cast<int>(input.outputFormat)
                   << " depthFfx=" << static_cast<int>(mcvr::fsr::vkToFfxFormat(input.depthFormat)) << " jitter=("
                   << input.jitterOffsetX << "," << input.jitterOffsetY << ")" << " mvScale=("
                   << input.motionVectorScaleX << "," << input.motionVectorScaleY << ")" << " reset=" << input.reset
                   << " preExposure=" << input.preExposure << " exposure=" << (input.exposureImage != VK_NULL_HANDLE)
                   << " reactive=" << (input.reactiveImage != VK_NULL_HANDLE) << std::endl;
-        std::cout << "[FSR3] formats: color=R16G16B16A16_SFLOAT motion=R16G16_SFLOAT output=R16G16B16A16_SFLOAT"
-                  << std::endl;
 #    endif
     }
 
@@ -376,18 +378,27 @@ void FSR3Upscaler::dispatch(const UpscalerInput &input) {
         return resource;
     };
 
+    const VkFormat colorFormat =
+        input.colorFormat != VK_FORMAT_UNDEFINED ? input.colorFormat : VK_FORMAT_R16G16B16A16_SFLOAT;
+    const VkFormat depthFormat = input.depthFormat != VK_FORMAT_UNDEFINED ? input.depthFormat : VK_FORMAT_D32_SFLOAT;
+    const VkFormat motionVectorFormat =
+        input.motionVectorFormat != VK_FORMAT_UNDEFINED ? input.motionVectorFormat : VK_FORMAT_R16G16_SFLOAT;
+    const VkFormat outputFormat =
+        input.outputFormat != VK_FORMAT_UNDEFINED ? input.outputFormat : colorFormat;
+
     ffx::DispatchDescUpscale dispatchUpscale{};
     dispatchUpscale.commandList = input.commandBuffer;
 
-    dispatchUpscale.color = createResource(input.colorImage, input.renderWidth, input.renderHeight,
-                                           VK_FORMAT_R16G16B16A16_SFLOAT, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    dispatchUpscale.color =
+        createResource(input.colorImage, input.renderWidth, input.renderHeight, colorFormat,
+                       FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
 
-    VkFormat depthFormat = input.depthFormat != VK_FORMAT_UNDEFINED ? input.depthFormat : VK_FORMAT_D32_SFLOAT;
     dispatchUpscale.depth = createResource(input.depthImage, input.renderWidth, input.renderHeight, depthFormat,
                                            FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
 
-    dispatchUpscale.motionVectors = createResource(input.motionVectorImage, input.renderWidth, input.renderHeight,
-                                                   VK_FORMAT_R16G16_SFLOAT, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    dispatchUpscale.motionVectors =
+        createResource(input.motionVectorImage, input.renderWidth, input.renderHeight, motionVectorFormat,
+                       FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
 
     if (input.exposureImage != VK_NULL_HANDLE) {
         dispatchUpscale.exposure =
@@ -406,9 +417,9 @@ void FSR3Upscaler::dispatch(const UpscalerInput &input) {
     dispatchUpscale.transparencyAndComposition = {};
 
     // Output resource
-    dispatchUpscale.output =
-        createResource(input.outputImage, input.displayWidth, input.displayHeight, VK_FORMAT_R16G16B16A16_SFLOAT,
-                       FFX_API_RESOURCE_STATE_UNORDERED_ACCESS, FFX_API_RESOURCE_USAGE_UAV);
+    dispatchUpscale.output = createResource(input.outputImage, input.displayWidth, input.displayHeight, outputFormat,
+                                            FFX_API_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            FFX_API_RESOURCE_USAGE_UAV);
 
     // Jitter offset
     dispatchUpscale.jitterOffset.x = input.jitterOffsetX;
@@ -437,7 +448,7 @@ void FSR3Upscaler::dispatch(const UpscalerInput &input) {
     dispatchUpscale.cameraNear = input.cameraNear;
     dispatchUpscale.cameraFar = input.cameraFar;
     dispatchUpscale.cameraFovAngleVertical = input.cameraFovVertical;
-    dispatchUpscale.viewSpaceToMetersFactor = 1.0f;
+    dispatchUpscale.viewSpaceToMetersFactor = 0.0f;
 
     // Flags
     dispatchUpscale.flags = 0;
@@ -446,7 +457,9 @@ void FSR3Upscaler::dispatch(const UpscalerInput &input) {
     static int dispatchCount = 0;
     ffx::ReturnCode retCode = ffx::Dispatch(reinterpret_cast<ffx::Context &>(m_fsrContext), dispatchUpscale);
     if (retCode != ffx::ReturnCode::Ok) {
-        std::cerr << "FSR3 DISPATCH FAILED: " << static_cast<uint32_t>(retCode) << std::endl;
+        std::cerr << "FSR3 DISPATCH FAILED: " << toFFXReturnCodeString(retCode) << " ("
+                  << static_cast<uint32_t>(retCode) << ")" << std::endl;
+        return;
     }
     // else {
     //     dispatchCount++;
@@ -491,8 +504,6 @@ void FSR3Upscaler::resize(uint32_t renderWidth, uint32_t renderHeight, uint32_t 
 
 void FSR3Upscaler::destroy() {
 #ifdef MCVR_ENABLE_FFX_UPSCALER
-    if (!m_initialized) { return; }
-
     destroyContext();
 
     m_device = VK_NULL_HANDLE;

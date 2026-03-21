@@ -103,13 +103,22 @@ class SwapchainImage : public Image, public SharedObject<SwapchainImage> {
 
 class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
   public:
+#ifdef DEBUG
+    std::string debugName;
+#endif
+
     DeviceLocalImage(std::shared_ptr<Device> device,
                      std::shared_ptr<VMA> vma,
                      uint32_t width,
                      uint32_t height,
                      uint32_t layer,
                      VkFormat format,
-                     VkImageUsageFlags usage);
+                     VkImageUsageFlags usage
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
     DeviceLocalImage(std::shared_ptr<Device> device,
                      std::shared_ptr<VMA> vma,
                      bool persistStaging,
@@ -117,7 +126,12 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
                      uint32_t height,
                      uint32_t layer,
                      VkFormat format,
-                     VkImageUsageFlags usage);
+                     VkImageUsageFlags usage
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
     DeviceLocalImage(std::shared_ptr<Device> device,
                      std::shared_ptr<VMA> vma,
                      bool persistStaging,
@@ -128,7 +142,12 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
                      VkImageUsageFlags usage,
                      VmaAllocationCreateFlags allocationFlags,
                      VmaMemoryUsage vmaUsage,
-                     VkImageCreateFlags imageCreateFlags = 0);
+                     VkImageCreateFlags imageCreateFlags = 0
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
     DeviceLocalImage(std::shared_ptr<Device> device,
                      std::shared_ptr<VMA> vma,
                      bool persistStaging,
@@ -140,7 +159,12 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
                      VkImageUsageFlags usage,
                      VmaAllocationCreateFlags allocationFlag,
                      VmaMemoryUsage vmaUsage,
-                     VkImageCreateFlags imageCreateFlags = 0);
+                     VkImageCreateFlags imageCreateFlags = 0
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
     ~DeviceLocalImage();
 
     // void downloadFromStagingBuffer(size_t size = -1, size_t offset = -1);

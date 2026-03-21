@@ -40,7 +40,7 @@ class Textures : public SharedObject<Textures> {
     std::map<uint32_t, std::shared_ptr<vk::DeviceLocalImage>> textures_;
     std::map<uint32_t, std::shared_ptr<vk::Sampler>> samplers;
     uint32_t nextID = 0;
-    std::recursive_mutex mutex_;
+    std::recursive_mutex mtx_;
 
     std::map<uint32_t, std::shared_ptr<ImageBufferCache>> caches_;
     std::shared_ptr<std::map<uint32_t, std::vector<VkBufferImageCopy>>> uploadQueue_;

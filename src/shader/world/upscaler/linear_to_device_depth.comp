@@ -38,6 +38,5 @@ void main() {
     imageStore(deviceDepth, ivec2(coord), vec4(deviceDepthValue));
 
     vec2 mv = imageLoad(motionVectorIn, ivec2(coord)).xy;
-    mv += params.jitter;
     imageStore(motionVectorOut, ivec2(coord), vec4(mv, 0.0, 0.0));
 }

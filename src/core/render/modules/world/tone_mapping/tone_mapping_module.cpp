@@ -4,6 +4,56 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+
+namespace {
+
+bool tryParseFloat(const std::string &text, float &outValue) {
+    try {
+        outValue = std::stof(text);
+        return true;
+    } catch (...) { return false; }
+}
+
+bool tryParseInt(const std::string &text, int &outValue) {
+    try {
+        outValue = std::stoi(text);
+        return true;
+    } catch (...) { return false; }
+}
+
+bool parseBoolValue(const std::string &value, bool fallback) {
+    if (value == "render_pipeline.true")
+        return true;
+    else if (value == "render_pipeline.false")
+        return false;
+    else
+        return fallback;
+}
+
+int parseToneMappingMethodValue(const std::string &value, int fallback) {
+    if (value == "render_pipeline.module.tone_mapping.attribute.method.pbr_neutral") return TONE_MAPPING_METHOD_PBR_NEUTRAL;
+    if (value == "render_pipeline.module.tone_mapping.attribute.method.reinhard") return TONE_MAPPING_METHOD_REINHARD;
+    if (value == "render_pipeline.module.tone_mapping.attribute.method.reinhard_white_point") return TONE_MAPPING_METHOD_REINHARD_WHITE_POINT;
+    if (value == "render_pipeline.module.tone_mapping.attribute.method.aces") return TONE_MAPPING_METHOD_ACES_FITTED;
+    if (value == "render_pipeline.module.tone_mapping.attribute.method.aces_white_point")
+        return TONE_MAPPING_METHOD_ACES_FITTED_WHITE_POINT;
+    if (value == "render_pipeline.module.tone_mapping.attribute.method.uncharted2") return TONE_MAPPING_METHOD_UNCHARTED2;
+    return fallback;
+}
+
+int parseExposureMeteringModeValue(const std::string &value, int fallback) {
+    if (value == "render_pipeline.module.tone_mapping.attribute.exposure_metering_mode.global")
+        return TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL;
+    if (value == "render_pipeline.module.tone_mapping.attribute.exposure_metering_mode.center")
+        return TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER;
+    return fallback;
+}
+
+} // namespace
+
 ToneMappingModule::ToneMappingModule() {}
 
 void ToneMappingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -48,12 +98,48 @@ bool ToneMappingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::
 
 void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
     for (int i = 0; i < attributeCount; i++) {
-        if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.middle_grey") {
-            middleGrey_ = std::stof(attributeKVs[2 * i + 1]);
-        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_up_speed") {
-            speedUp_ = std::stof(attributeKVs[2 * i + 1]);
-        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_down_speed") {
-            speedDown_ = std::stof(attributeKVs[2 * i + 1]);
+        const std::string &key = attributeKVs[2 * i];
+        const std::string &value = attributeKVs[2 * i + 1];
+
+        float floatValue = 0.0f;
+        if (key == "render_pipeline.module.tone_mapping.attribute.middle_grey") {
+            if (tryParseFloat(value, floatValue)) middleGrey_ = std::max(floatValue, 1e-4f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_up_speed") {
+            if (tryParseFloat(value, floatValue)) speedUp_ = std::max(floatValue, 0.0f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_down_speed") {
+            if (tryParseFloat(value, floatValue)) speedDown_ = std::max(floatValue, 0.0f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.log2_luminance_min") {
+            if (tryParseFloat(value, floatValue)) log2Min_ = floatValue;
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.log2_luminance_max") {
+            if (tryParseFloat(value, floatValue)) log2Max_ = floatValue;
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.histogram_epsilon") {
+            if (tryParseFloat(value, floatValue)) epsilon_ = std::max(floatValue, 1e-8f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.low_percent") {
+            if (tryParseFloat(value, floatValue)) lowPercent_ = floatValue;
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.high_percent") {
+            if (tryParseFloat(value, floatValue)) highPercent_ = floatValue;
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.min_exposure") {
+            if (tryParseFloat(value, floatValue)) minExposure_ = std::max(floatValue, 1e-6f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
+            if (tryParseFloat(value, floatValue)) maxExposure_ = std::max(floatValue, 1e-6f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.enable_auto_exposure") {
+            autoExposure_ = parseBoolValue(value, autoExposure_);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.manual_exposure") {
+            if (tryParseFloat(value, floatValue)) manualExposure_ = std::max(floatValue, 1e-6f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_bias") {
+            if (tryParseFloat(value, floatValue)) exposureBias_ = floatValue;
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.white_point") {
+            if (tryParseFloat(value, floatValue)) whitePoint_ = std::max(floatValue, 1e-3f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.saturation") {
+            if (tryParseFloat(value, floatValue)) saturation_ = std::max(floatValue, 0.0f);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.clamp_output") {
+            clampOutput_ = parseBoolValue(value, clampOutput_);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.method") {
+            toneMappingMethod_ = parseToneMappingMethodValue(value, toneMappingMethod_);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_metering_mode") {
+            exposureMeteringMode_ = parseExposureMeteringModeValue(value, exposureMeteringMode_);
+        } else if (key == "render_pipeline.module.tone_mapping.attribute.center_metering_percent") {
+            if (tryParseFloat(value, floatValue)) centerMeteringPercent_ = std::clamp(floatValue, 1.0f, 100.0f);
         }
     }
 }
@@ -76,6 +162,8 @@ void ToneMappingModule::build() {
         contexts_[i] = ToneMappingModuleContext::create(framework->contexts()[i], worldPipeline->contexts()[i],
                                                         shared_from_this());
     }
+
+    lastTimePoint_ = std::chrono::high_resolution_clock::now();
 }
 
 std::vector<std::shared_ptr<WorldModuleContext>> &ToneMappingModule::contexts() {
@@ -120,7 +208,7 @@ void ToneMappingModule::initDescriptorTables() {
                                    .endDescriptorLayoutSetBinding()
                                    .endDescriptorLayoutSet()
                                    .definePushConstant(VkPushConstantRange{
-                                       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                        .offset = 0,
                                        .size = sizeof(ToneMappingModulePushConstant),
                                    })
@@ -168,19 +256,19 @@ void ToneMappingModule::initRenderPass() {
                       .defineAttachmentDescription({
                           // color
                           .format = ldrImages_[0]->vkFormat(),
-                      .samples = VK_SAMPLE_COUNT_1_BIT,
-                      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                          .samples = VK_SAMPLE_COUNT_1_BIT,
+                          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                          .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                          .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
 #ifdef USE_AMD
-                      .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
-                      .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                      .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 #endif
-                  })
+                      })
                       .endAttachmentDescription()
                       .beginAttachmentReference()
                       .defineAttachmentReference({
@@ -257,9 +345,9 @@ void ToneMappingModule::initPipeline() {
                             },
                     })
                     .defineDepthStencilState({
-                        .depthTestEnable = VK_TRUE,
-                        .depthWriteEnable = VK_TRUE,
-                        .depthCompareOp = VK_COMPARE_OP_LESS,
+                        .depthTestEnable = VK_FALSE,
+                        .depthWriteEnable = VK_FALSE,
+                        .depthCompareOp = VK_COMPARE_OP_ALWAYS,
                         .depthBoundsTestEnable = VK_FALSE,
                         .stencilTestEnable = VK_FALSE,
                     })
@@ -289,11 +377,8 @@ void ToneMappingModuleContext::render() {
 
     auto module = toneMappingModule.lock();
 
-    auto chooseSrc = [](VkImageLayout oldLayout,
-                        VkPipelineStageFlags2 fallbackStage,
-                        VkAccessFlags2 fallbackAccess,
-                        VkPipelineStageFlags2 &outStage,
-                        VkAccessFlags2 &outAccess) {
+    auto chooseSrc = [](VkImageLayout oldLayout, VkPipelineStageFlags2 fallbackStage, VkAccessFlags2 fallbackAccess,
+                        VkPipelineStageFlags2 &outStage, VkAccessFlags2 &outAccess) {
         if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
             outStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
             outAccess = 0;
@@ -308,15 +393,13 @@ void ToneMappingModuleContext::render() {
     chooseSrc(hdrImage->imageLayout(),
               VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                   VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-              hdrSrcStage, hdrSrcAccess);
+              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, hdrSrcStage, hdrSrcAccess);
 
     VkPipelineStageFlags2 ldrSrcStage = 0;
     VkAccessFlags2 ldrSrcAccess = 0;
     chooseSrc(ldrImage->imageLayout(),
               VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-              ldrSrcStage, ldrSrcAccess);
+              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, ldrSrcStage, ldrSrcAccess);
 
     worldCommandBuffer->barriersBufferImage(
         {{
@@ -344,13 +427,14 @@ void ToneMappingModuleContext::render() {
          {
              .srcStageMask = ldrSrcStage,
              .srcAccessMask = ldrSrcAccess,
-             .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-             .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
              .oldLayout = ldrImage->imageLayout(),
 #ifdef USE_AMD
-                 .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+             .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
-                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+             .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 #endif
              .srcQueueFamilyIndex = mainQueueIndex,
              .dstQueueFamilyIndex = mainQueueIndex,
@@ -384,21 +468,44 @@ void ToneMappingModuleContext::render() {
     std::chrono::duration<double> elapsedTime = currentTimePoint - module->lastTimePoint_;
     module->lastTimePoint_ = currentTimePoint;
 
+    float dtSeconds = static_cast<float>(elapsedTime.count());
+    if (!std::isfinite(dtSeconds)) dtSeconds = 1.0f / 60.0f;
+    dtSeconds = std::clamp(dtSeconds, 0.0f, 1.0f);
+
+    float sanitizedLog2Min = std::min(module->log2Min_, module->log2Max_ - 1e-3f);
+    float sanitizedLog2Max = std::max(module->log2Max_, sanitizedLog2Min + 1e-3f);
+    float sanitizedLowPercent = std::clamp(module->lowPercent_, 0.0f, 0.9999f);
+    float sanitizedHighPercent = std::clamp(module->highPercent_, sanitizedLowPercent + 1e-4f, 1.0f);
+    float sanitizedCenterMeteringPercent = std::clamp(module->centerMeteringPercent_, 1.0f, 100.0f) / 100.0f;
+
     ToneMappingModulePushConstant pc{};
-    pc.log2Min = -12.0f;
-    pc.log2Max = +4.0f;
-    pc.epsilon = 1e-6f;
-    pc.lowPercent = 0.005f;
-    pc.highPercent = 0.99f;
-    pc.middleGrey = module->middleGrey_;
-    pc.dt = elapsedTime.count();
-    pc.speedUp = module->speedUp_;
-    pc.speedDown = module->speedDown_;
-    pc.minExposure = 1e-4f;
-    pc.maxExposure = 2.0f;
+    pc.log2Min = sanitizedLog2Min;
+    pc.log2Max = sanitizedLog2Max;
+    pc.epsilon = std::max(module->epsilon_, 1e-8f);
+    pc.lowPercent = sanitizedLowPercent;
+    pc.highPercent = sanitizedHighPercent;
+    pc.middleGrey = std::max(module->middleGrey_, 1e-4f);
+    pc.dt = dtSeconds;
+    pc.speedUp = std::max(module->speedUp_, 0.0f);
+    pc.speedDown = std::max(module->speedDown_, 0.0f);
+    pc.minExposure = std::max(module->minExposure_, 1e-6f);
+    pc.maxExposure = std::max(module->maxExposure_, pc.minExposure);
+    pc.manualExposure = std::max(module->manualExposure_, 1e-6f);
+    pc.exposureBias = module->exposureBias_;
+    pc.whitePoint = std::max(module->whitePoint_, 1e-3f);
+    pc.saturation = std::max(module->saturation_, 0.0f);
+    pc.toneMappingMethod = std::clamp(module->toneMappingMethod_, static_cast<int>(TONE_MAPPING_METHOD_PBR_NEUTRAL),
+                                      static_cast<int>(TONE_MAPPING_METHOD_UNCHARTED2));
+    pc.autoExposure = module->autoExposure_ ? 1 : 0;
+    pc.clampOutput = module->clampOutput_ ? 1 : 0;
+    pc.exposureMeteringMode =
+        std::clamp(module->exposureMeteringMode_, static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL),
+                   static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER));
+    pc.centerMeteringPercent = sanitizedCenterMeteringPercent;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);
+                       VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(ToneMappingModulePushConstant), &pc);
 
     worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
         ->bindComputePipeline(module->histPipeline_);
@@ -440,7 +547,7 @@ void ToneMappingModuleContext::render() {
         .renderPass = module->renderPass_,
         .framebuffer = framebuffer,
         .renderAreaExtent = {ldrImage->width(), ldrImage->height()},
-        .clearValues = {{.color = {0.1f, 0.1f, 0.1f, 1.0f}}, {.depthStencil = {.depth = 1.0f}}},
+        .clearValues = {{.color = {0.1f, 0.1f, 0.1f, 1.0f}}},
     });
     ldrImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 

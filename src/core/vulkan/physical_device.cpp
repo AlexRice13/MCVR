@@ -114,17 +114,17 @@ vk::PhysicalDevice::PhysicalDevice(std::shared_ptr<Instance> instance, std::shar
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelStructProperties{};
     accelStructProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
 
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProperties{};
-    rtProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
-    rtProperties.pNext = &accelStructProperties;
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties{};
+    rayTracingProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+    rayTracingProperties.pNext = &accelStructProperties;
 
     VkPhysicalDeviceProperties2 deviceProps2{};
     deviceProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    deviceProps2.pNext = &rtProperties;
+    deviceProps2.pNext = &rayTracingProperties;
     vkGetPhysicalDeviceProperties2(physicalDevice_, &deviceProps2);
 
     properties_ = deviceProps2.properties;
-    rayTracingProperties_ = rtProperties;
+    rayTracingProperties_ = rayTracingProperties;
     accelerationStructProperties_ = accelStructProperties;
 }
 

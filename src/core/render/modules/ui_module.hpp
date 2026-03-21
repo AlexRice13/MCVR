@@ -52,6 +52,7 @@ class UIModule : public SharedObject<UIModule> {
 
   public:
     UIModule();
+    ~UIModule();
 
     void init(std::shared_ptr<Framework> framework);
     std::vector<std::shared_ptr<UIModuleContext>> &contexts();

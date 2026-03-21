@@ -99,6 +99,11 @@ class PostRenderModule : public WorldModule, public SharedObject<PostRenderModul
 
     std::vector<std::shared_ptr<WorldModuleContext>> contexts_;
 
+    uint32_t starCount_ = 3000;
+    float starSizeMin_ = 0.5f;
+    float starSizeMax_ = 0.7f;
+    float starRadius_ = 400.0f;
+
     uint32_t width_, height_;
 };
 

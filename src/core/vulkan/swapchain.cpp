@@ -27,18 +27,39 @@ vk::Swapchain::Swapchain(std::shared_ptr<PhysicalDevice> physicalDevice,
 }
 
 VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
-    // We can either choose any format
+    // can choose any format
     if (availableFormats.size() == 1 && availableFormats[0].format == VK_FORMAT_UNDEFINED) {
+#ifdef DEBUG
+        std::cout << "selected surface format: " << VK_FORMAT_R8G8B8A8_UNORM
+                  << " color space: " << VK_COLORSPACE_SRGB_NONLINEAR_KHR << std::endl;
+#endif
         return {VK_FORMAT_R8G8B8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR_KHR};
     }
 
-    // Or go with the standard format - if available
-    for (const auto &availableSurfaceFormat : availableFormats) {
-        if (availableSurfaceFormat.format == VK_FORMAT_R8G8B8A8_UNORM) { return availableSurfaceFormat; }
+    auto formatRank = [](VkFormat format) {
+        switch (format) {
+            case VK_FORMAT_R8G8B8A8_UNORM: return 0;
+            case VK_FORMAT_B8G8R8A8_UNORM: return 1;
+            case VK_FORMAT_R8G8B8A8_SRGB: return 2;
+            case VK_FORMAT_B8G8R8A8_SRGB: return 3;
+            default: return 4;
+        }
+    };
+
+    auto selectedFormat = std::min_element(
+        availableFormats.begin(), availableFormats.end(),
+        [&formatRank](const auto &lhs, const auto &rhs) { return formatRank(lhs.format) < formatRank(rhs.format); });
+
+    if (selectedFormat->format == VK_FORMAT_R8G8B8A8_SRGB || selectedFormat->format == VK_FORMAT_B8G8R8A8_SRGB) {
+        swapchainCerr() << "warning: selected SRGB surface format (" << selectedFormat->format
+                        << "), UNORM format unavailable, this may cause color space error" << std::endl;
     }
 
-    // Or fall back to the first available one
-    return availableFormats[0];
+#ifdef DEBUG
+    std::cout << "selected surface format: " << selectedFormat->format << " color space: " << selectedFormat->colorSpace
+              << std::endl;
+#endif
+    return *selectedFormat;
 }
 
 VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &surfaceCapabilities, uint32_t width, uint32_t height) {

@@ -2,7 +2,8 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_GOOGLE_include_directive : require
 
-#include "../util/ray_payloads.glsl"
+#include "util/color_space.glsl"
+#include "util/ray.glsl"
 #include "common/shared.hpp"
 
 layout(set = 0, binding = 1) uniform sampler2D transLUT;
@@ -25,7 +26,7 @@ vec2 transmittanceUv(float r, float mu, SkyUBO ubo) {
 
 vec3 sampleTransmittance(float r, float mu) {
     vec2 uv = transmittanceUv(r, mu, skyUBO);
-    return texture(transLUT, uv).rgb;
+    return sampleTexture(transLUT, uv, false).rgb;
 }
 
 void main() {

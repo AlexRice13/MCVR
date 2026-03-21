@@ -192,8 +192,8 @@ void TemporalAccumulationModule::initRenderPass() {
                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                           .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                           .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                          .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                          .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       })
                       .defineAttachmentDescription({
                           // color
@@ -203,8 +203,8 @@ void TemporalAccumulationModule::initRenderPass() {
                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                           .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                           .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                          .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                          .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       })
                       .endAttachmentDescription()
                       .beginAttachmentReference()
@@ -212,11 +212,15 @@ void TemporalAccumulationModule::initRenderPass() {
                           .attachment = 0,
                           .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       })
+                      .defineAttachmentReference({
+                          .attachment = 1,
+                          .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      })
                       .endAttachmentReference()
                       .beginSubpassDescription()
                       .defineSubpassDescription({
                           .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          .colorAttachmentIndices = {0},
+                          .colorAttachmentIndices = {0, 1},
                       })
                       .endSubpassDescription()
                       .build(framework_.lock()->device());
@@ -270,14 +274,15 @@ void TemporalAccumulationModule::initPipeline() {
                             },
                     })
                     .defineDepthStencilState({
-                        .depthTestEnable = VK_TRUE,
-                        .depthWriteEnable = VK_TRUE,
-                        .depthCompareOp = VK_COMPARE_OP_LESS,
+                        .depthTestEnable = VK_FALSE,
+                        .depthWriteEnable = VK_FALSE,
+                        .depthCompareOp = VK_COMPARE_OP_ALWAYS,
                         .depthBoundsTestEnable = VK_FALSE,
                         .stencilTestEnable = VK_FALSE,
                     })
                     .beginColorBlendAttachmentState()
                     .defineDefaultColorBlendAttachmentState() // color
+                    .defineDefaultColorBlendAttachmentState() // normal
                     .endColorBlendAttachmentState()
                     .definePipelineLayout(descriptorTables_[0])
                     .build(framework->device());
@@ -291,6 +296,7 @@ TemporalAccumulationModuleContext::TemporalAccumulationModuleContext(
       temporalAccumulationModule(temporalAccumulationModule),
       hdrNoisyImage(temporalAccumulationModule->hdrNoisyImages_[frameworkContext->frameIndex]),
       motionVectorImage(temporalAccumulationModule->motionVectorImages_[frameworkContext->frameIndex]),
+      normalRoughnessImage(temporalAccumulationModule->normalRoughnessImages_[frameworkContext->frameIndex]),
       descriptorTable(temporalAccumulationModule->descriptorTables_[frameworkContext->frameIndex]),
       framebuffer(temporalAccumulationModule->framebuffers_[frameworkContext->frameIndex]),
       accumulatedRadianceImage(temporalAccumulationModule->accumulatedRadianceImage_),
@@ -307,24 +313,81 @@ void TemporalAccumulationModuleContext::render() {
 
     auto module = temporalAccumulationModule.lock();
 
+    auto chooseSrc = [](VkImageLayout oldLayout, VkPipelineStageFlags2 fallbackStage, VkAccessFlags2 fallbackAccess,
+                        VkPipelineStageFlags2 &outStage, VkAccessFlags2 &outAccess) {
+        if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+            outStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+            outAccess = 0;
+        } else {
+            outStage = fallbackStage;
+            outAccess = fallbackAccess;
+        }
+    };
+
+    VkPipelineStageFlags2 sampledSrcStage = 0;
+    VkAccessFlags2 sampledSrcAccess = 0;
+    VkPipelineStageFlags2 historySrcStage = 0;
+    VkAccessFlags2 historySrcAccess = 0;
+    VkPipelineStageFlags2 outputSrcStage = 0;
+    VkAccessFlags2 outputSrcAccess = 0;
+    VkPipelineStageFlags2 normalOutputSrcStage = 0;
+    VkAccessFlags2 normalOutputSrcAccess = 0;
+
+    chooseSrc(hdrNoisyImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                  VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, sampledSrcStage, sampledSrcAccess);
+
+    VkPipelineStageFlags2 motionSrcStage = 0;
+    VkAccessFlags2 motionSrcAccess = 0;
+    chooseSrc(motionVectorImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                  VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, motionSrcStage, motionSrcAccess);
+
+    VkPipelineStageFlags2 normalSrcStage = 0;
+    VkAccessFlags2 normalSrcAccess = 0;
+    chooseSrc(normalRoughnessImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                  VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, normalSrcStage, normalSrcAccess);
+
+    chooseSrc(accumulatedRadianceImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT, historySrcStage, historySrcAccess);
+
+    VkPipelineStageFlags2 normalHistorySrcStage = 0;
+    VkAccessFlags2 normalHistorySrcAccess = 0;
+    chooseSrc(accumulatedNormalImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT, normalHistorySrcStage,
+              normalHistorySrcAccess);
+
+    chooseSrc(accumulatedRadianceOutImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                  VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+              outputSrcStage, outputSrcAccess);
+
+    chooseSrc(accumulatedNormalOutImage->imageLayout(),
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                  VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+              normalOutputSrcStage, normalOutputSrcAccess);
+
     TemporalAccumulationPushConstant pc{};
     pc.alpha = module->alpha_;
-    pc.threshold = module->threshould_;
+    pc.threshold = module->threshold_;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
-                       VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                           VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-                           VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
-                       0, sizeof(uint32_t), &pc);
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TemporalAccumulationPushConstant), &pc);
 
     worldCommandBuffer->barriersBufferImage(
         {}, {{
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = sampledSrcStage,
+                 .srcAccessMask = sampledSrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                  .oldLayout = hdrNoisyImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
@@ -333,12 +396,10 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = motionSrcStage,
+                 .srcAccessMask = motionSrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                  .oldLayout = motionVectorImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
@@ -347,12 +408,22 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = normalSrcStage,
+                 .srcAccessMask = normalSrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 .oldLayout = normalRoughnessImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = normalRoughnessImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange,
+             },
+             {
+                 .srcStageMask = historySrcStage,
+                 .srcAccessMask = historySrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                  .oldLayout = accumulatedRadianceImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
@@ -361,44 +432,69 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = normalHistorySrcStage,
+                 .srcAccessMask = normalHistorySrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 .oldLayout = accumulatedNormalImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = accumulatedNormalImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange,
+             },
+             {
+                 .srcStageMask = outputSrcStage,
+                 .srcAccessMask = outputSrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                  .oldLayout = accumulatedRadianceOutImage->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                 .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
                  .dstQueueFamilyIndex = mainQueueIndex,
                  .image = accumulatedRadianceOutImage,
                  .subresourceRange = vk::wholeColorSubresourceRange,
+             },
+             {
+                 .srcStageMask = normalOutputSrcStage,
+                 .srcAccessMask = normalOutputSrcAccess,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 .oldLayout = accumulatedNormalOutImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = accumulatedNormalOutImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange,
              }});
     hdrNoisyImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     motionVectorImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    normalRoughnessImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     accumulatedRadianceImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    accumulatedNormalImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    accumulatedNormalOutImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->renderPass_,
         .framebuffer = framebuffer,
         .renderAreaExtent = {accumulatedRadianceOutImage->width(), accumulatedRadianceOutImage->height()},
-        .clearValues = {{.color = {0.1f, 0.1f, 0.1f, 1.0f}}, {.depthStencil = {.depth = 1.0f}}},
+        .clearValues = {{.color = {0.0f, 0.0f, 0.0f, 1.0f}}, {.color = {0.0f, 0.0f, 0.0f, 1.0f}}},
     });
-    accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     worldCommandBuffer->bindGraphicsPipeline(module->pipeline_)
         ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->draw(3, 1)
         ->endRenderPass();
-    accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    accumulatedNormalOutImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     worldCommandBuffer->barriersBufferImage(
         {}, {{
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
                  .oldLayout = accumulatedRadianceOutImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
@@ -407,12 +503,10 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
                  .oldLayout = accumulatedNormalOutImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
@@ -421,10 +515,10 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
                  .oldLayout = accumulatedRadianceImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
@@ -433,10 +527,10 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
                  .oldLayout = accumulatedNormalImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,

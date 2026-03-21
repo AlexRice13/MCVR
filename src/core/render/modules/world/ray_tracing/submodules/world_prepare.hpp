@@ -5,10 +5,15 @@
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
+#include <map>
+#include <mutex>
+#include <queue>
+
 class Framework;
 class FrameworkContext;
 class RayTracingModule;
 struct RayTracingModuleContext;
+struct Entity;
 
 struct WorldPrepareContext;
 
@@ -25,8 +30,14 @@ class WorldPrepare : public SharedObject<WorldPrepare> {
     void build();
 
   private:
+    using EntityRenderDataBatch = std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>>;
+
     std::weak_ptr<Framework> framework_;
     std::weak_ptr<RayTracingModule> rayTracingModule_;
+
+    std::queue<EntityRenderDataBatch> previousEntityRenderDataBatches_;
+    EntityRenderDataBatch emptyEntityRenderDataBatch_;
+    std::recursive_mutex entityRenderDataBatchesMtx_;
 
     std::vector<std::shared_ptr<WorldPrepareContext>> contexts_;
 };
@@ -42,8 +53,11 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;
+    std::shared_ptr<vk::DeviceLocalBuffer> positionBufferAddr;
+    std::shared_ptr<vk::DeviceLocalBuffer> materialBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastVertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastIndexBufferAddr;
+    std::shared_ptr<vk::DeviceLocalBuffer> lastPositionBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastObjToWorldMat;
 
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
@@ -51,8 +65,11 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     void uploadBuffer(std::vector<uint32_t> &blasOffsets,
                       std::vector<uint64_t> &vertexBufferAddrs,
                       std::vector<uint64_t> &indexBufferAddrs,
+                      std::vector<uint64_t> &positionBufferAddrs,
+                      std::vector<uint64_t> &materialBufferAddrs,
                       std::vector<uint64_t> &lastVertexBufferAddrs,
                       std::vector<uint64_t> &lastIndexBufferAddrs,
+                      std::vector<uint64_t> &lastPositionBufferAddrs,
                       std::vector<glm::mat4> &lastObjToWorldMats);
     void render();
 };

@@ -32,6 +32,5 @@ void main() {
 
     fragColor = color;
 
-    float linearDepth = 0.95;
-    gl_FragDepth = linearDepth;
+    gl_FragDepth = 0.999999;
 }

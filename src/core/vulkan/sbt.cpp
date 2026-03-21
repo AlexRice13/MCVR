@@ -20,11 +20,11 @@ vk::SBT::SBT(std::shared_ptr<PhysicalDevice> physicalDevice,
              uint32_t missCount,
              uint32_t hitCount)
     : vma_(vma), device_(device), missCount_(missCount) {
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProperties = physicalDevice->rayTracingProperties();
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties = physicalDevice->rayTracingProperties();
 
-    handleSize_ = rtProperties.shaderGroupHandleSize;
-    uint32_t handleAlignment = rtProperties.shaderGroupHandleAlignment;
-    baseAlignment_ = rtProperties.shaderGroupBaseAlignment;
+    handleSize_ = rayTracingProperties.shaderGroupHandleSize;
+    uint32_t handleAlignment = rayTracingProperties.shaderGroupHandleAlignment;
+    baseAlignment_ = rayTracingProperties.shaderGroupBaseAlignment;
     #ifdef DEBUG
     std::cout << "handleSize: " << handleSize_ << " handleAlignment: " << handleAlignment
               << " baseAlignment: " << baseAlignment_ << std::endl;

@@ -115,7 +115,7 @@ namespace VertexFormat {
         T_UINT normal; // first 3 bytes
     };
 
-    struct PBRTriangle {
+    struct PBRVertex {
         T_VEC3 pos;
         T_UINT useNorm;
 
@@ -141,7 +141,31 @@ namespace VertexFormat {
         T_FLOAT albedoEmission;
 
         T_VEC3 postBase;
+        T_UINT alphaMode;
+    };
+
+    struct PositionVertex {
+        T_VEC3 pos;
+        T_UINT pad0;
+    };
+
+    struct MaterialVertex {
+        T_VEC3 norm;
+        T_UINT textureID;
+
+        T_VEC4 colorLayer;
+
+        T_VEC2 textureUV;
+        T_IVEC2 overlayUV;
+
+        T_VEC2 glintUV;
+        T_UINT glintTexture;
+        T_FLOAT albedoEmission;
+
+        T_UINT packedData;
+        T_UINT pad0;
         T_UINT pad1;
+        T_UINT pad2;
     };
 #ifdef __cplusplus
 }; // namespace VertexFormat

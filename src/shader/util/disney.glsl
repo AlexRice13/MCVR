@@ -44,9 +44,9 @@
  * Note: Original license notice and permission notice are retained per MIT License.
  */
 
+#include "common/shared.hpp"
 #include "labpbr.glsl"
 #include "random.glsl"
-#include "common/shared.hpp"
 
 #ifndef DISNEY_GLSL
 #    define DISNEY_GLSL
@@ -118,13 +118,9 @@ vec3 SampleVMF(inout uint seed, vec3 mu, float kappa) {
     float vx = cos(phi);
     float vy = sin(phi);
 
-    vec3 u_basis;
-    if (abs(mu.x) > 0.99) {
-        u_basis = normalize(vec3(mu.y, -mu.x, 0.0));
-    } else {
-        u_basis = normalize(vec3(-mu.z, 0.0, mu.x));
-    }
-    vec3 v_basis = normalize(cross(mu, u_basis));
+    vec3 up = abs(mu.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 u_basis = normalize(cross(up, mu));
+    vec3 v_basis = cross(mu, u_basis);
 
     float sinTheta = sqrt(max(0.0, 1.0 - w * w));
     return normalize(w * mu + sinTheta * (vx * u_basis + vy * v_basis));
@@ -319,13 +315,13 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     if (r3 < cdf0) { // Diffuse
         lobeType = 0;
         localL = CosineSampleHemisphere(r1, r2);
-    } else if (r3 < cdf2) {                      // Dielectric + Metallic Reflection
+    } else if (r3 < cdf2) { // Dielectric + Metallic Reflection
         lobeType = 1;
         float a = mat.roughness * mat.roughness; // Isotropic
         vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);
         if (localH.z < 0.0) localH = -localH;
         localL = normalize(reflect(-localV, localH));
-    } else {                                     // Glass
+    } else { // Glass
         lobeType = 2;
         float a = mat.roughness * mat.roughness; // Isotropic
         vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);

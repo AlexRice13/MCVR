@@ -216,6 +216,7 @@ void Framework::acquireContext() {
     currentContext_ = contexts_[imageIndex];
     indexHistory_.push(imageIndex);
     if (indexHistory_.size() > swapchain_->imageCount()) indexHistory_.pop();
+    gc_->clear(imageIndex);
 
     if (currentContext_->imageAcquiredSemaphore != VK_NULL_HANDLE) {
         recycleSemaphore(currentContext_->imageAcquiredSemaphore);
@@ -233,8 +234,6 @@ void Framework::acquireContext() {
         lastContext == nullptr ? nullptr : pipeline_->acquirePipelineContext(lastContext)->uiModuleContext;
 
     pipelineContext->uiModuleContext->begin(lastUIContext);
-
-    gc_->clear();
     Renderer::instance().buffers()->resetFrame();
     Renderer::instance().textures()->resetFrame();
     Renderer::instance().world()->resetFrame();
@@ -599,9 +598,16 @@ GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : frame
     collectors_.resize(framework->swapchain_->imageCount());
 }
 
-void GarbageCollector::clear() {
-    index_ = (index_ + 1) % collectors_.size();
+void GarbageCollector::clear(uint32_t index) {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
+
+    index_ = index;
 
     auto framework = framework_.lock();
+
+#ifdef DEBUG
+    // std::cout << "GarbageCollector cleared for index: " << index << std::endl;
+#endif
+
     collectors_[index_].clear();
 }

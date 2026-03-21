@@ -3,9 +3,9 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : require
 
-#include "../util/ray_payloads.glsl"
-#include "../util/util.glsl"
 #include "common/shared.hpp"
+#include "util/ray.glsl"
+#include "util/util.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 0, binding = 1) uniform sampler2D transLUT;
@@ -23,7 +23,7 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
-layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
+layout(location = 0) rayPayloadInEXT MainRay mainRay;
 
 vec2 transmittanceUv(float r, float mu, SkyUBO ubo) {
     float u = clamp(mu * 0.5 + 0.5, 0.0, 1.0);
@@ -33,7 +33,7 @@ vec2 transmittanceUv(float r, float mu, SkyUBO ubo) {
 
 vec3 sampleTransmittance(float r, float mu) {
     vec2 uv = transmittanceUv(r, mu, skyUBO);
-    return texture(transLUT, uv).rgb;
+    return sampleTexture(transLUT, uv, false).rgb;
 }
 
 bool intersectSphere(vec3 ro, vec3 rd, float R, out float tNear, out float tFar) {
@@ -58,6 +58,35 @@ void makeBasis(in vec3 n, out vec3 t, out vec3 b) {
     b = normalize(b);
 }
 
+vec4 sampleTextureLod0(sampler2D tex, vec2 uv) {
+    ivec2 texSize = textureSize(tex, 0);
+    if (texSize.x <= 0 || texSize.y <= 0) return vec4(0.0);
+
+    vec2 halfTexel = 0.5 / vec2(texSize);
+    vec2 clampedUv = clamp(uv, halfTexel, vec2(1.0) - halfTexel);
+    return sampleTexture(tex, clampedUv, 0.0, false);
+}
+
+vec4 sampleAtlasLod0(sampler2D tex, vec2 uv01, uvec2 tileCount, uvec2 tile) {
+    ivec2 texSize = textureSize(tex, 0);
+    if (texSize.x <= 0 || texSize.y <= 0) return vec4(0.0);
+
+    vec2 invTileCount = 1.0 / vec2(tileCount);
+    vec2 tileMin = vec2(tile) * invTileCount;
+    vec2 tileMax = tileMin + invTileCount;
+
+    vec2 halfTexel = 0.5 / vec2(texSize);
+    vec2 minUv = tileMin + halfTexel;
+    vec2 maxUv = tileMax - halfTexel;
+    vec2 atlasUv = mix(minUv, maxUv, clamp(uv01, 0.0, 1.0));
+    return sampleTexture(tex, atlasUv, 0.0, false);
+}
+
+vec3 observerPlanetPos() {
+    float cameraHeight = worldUBO.cameraViewMatInv[3].y;
+    return vec3(0.0, skyUBO.Rg + cameraHeight + 70.0, 0.0);
+}
+
 vec4 evalSunBillboard(vec3 rd) {
     vec3 sunDir = normalize(skyUBO.sunDirection);
     rd = normalize(rd);
@@ -77,7 +106,7 @@ vec4 evalSunBillboard(vec3 rd) {
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
 
     vec2 uv = q / tanHalf * 0.5 + 0.5;
-    return texture(textures[nonuniformEXT(skyUBO.sunTextureID)], uv);
+    return sampleTextureLod0(textures[nonuniformEXT(skyUBO.sunTextureID)], uv);
 }
 
 vec4 evalMoonBillboard(vec3 rd) {
@@ -99,10 +128,9 @@ vec4 evalMoonBillboard(vec3 rd) {
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
 
     vec2 uv = q / tanHalf * 0.5 + 0.5;
-    uint col = skyUBO.moonPhase % 4;
-    uint row = skyUBO.moonPhase / 4 % 2;
-    uv = vec2((col + uv.x) / 4, (row + uv.y) / 2);
-    return texture(textures[nonuniformEXT(skyUBO.moonTextureID)], uv);
+    uvec2 tileCount = uvec2(4u, 2u);
+    uvec2 tile = uvec2(skyUBO.moonPhase % tileCount.x, (skyUBO.moonPhase / tileCount.x) % tileCount.y);
+    return sampleAtlasLod0(textures[nonuniformEXT(skyUBO.moonTextureID)], uv, tileCount, tile);
 }
 
 void main() {
@@ -110,16 +138,16 @@ void main() {
 
     if (skyUBO.cameraSubmersionType == 0 /*LAVA*/ || skyUBO.cameraSubmersionType == 2 /*POWDER_SNOW*/ ||
         skyUBO.hasBlindnessOrDarkness > 0) {
-        mainRay.stop = 1;
+        raySetStop(mainRay, true);
         mainRay.hitT = INF_DISTANCE;
     } else {
-        switch (skyUBO.skyType) {
+        switch (worldUBO.skyType) {
             case 0: // NONE
-                mainRay.stop = 1;
+                raySetStop(mainRay, true);
                 mainRay.hitT = INF_DISTANCE;
                 return;
             case 2: // END
-                mainRay.stop = 1;
+                raySetStop(mainRay, true);
                 mainRay.hitT = INF_DISTANCE;
                 return;
             case 1: // NORMAL
@@ -128,7 +156,6 @@ void main() {
 
         vec3 rd = normalize(gl_WorldRayDirectionEXT);
         vec3 sunDir = normalize(skyUBO.sunDirection);
-        vec3 moonDir = normalize(-skyUBO.sunDirection);
 
         float progress = skyUBO.rainGradient;
         vec3 rainyRadiance = mix(vec3(0.0), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
@@ -136,21 +163,18 @@ void main() {
         mainRay.radiance += mix(sunnyRadiance, rainyRadiance, progress) * mainRay.throughput;
 
         if (worldUBO.skyType == 1) {
+            vec3 pPlanet = observerPlanetPos();
+            float r = clamp(length(pPlanet), skyUBO.Rg, skyUBO.Rt);
+            vec3 up = pPlanet / max(r, 1e-6);
+
             {
                 vec4 sunSample = evalSunBillboard(rd);
-                if (sunSample.a > 0.0) {
-                    vec3 C = vec3(0.0, -skyUBO.Rg, 0.0);
-                    vec3 pWorld = gl_WorldRayOriginEXT;
-                    vec3 pPlanet = pWorld - C;
-
+                if (sunSample.a > 1e-4) {
                     float tG0, tG1;
                     bool hitGround = intersectSphere(pPlanet, rd, skyUBO.Rg, tG0, tG1);
-                    bool blocked = hitGround && (tG1 > 0.0);
+                    bool blocked = hitGround && (tG1 > 1e-3);
                     if (!blocked) {
-                        float r = length(pPlanet);
-                        vec3 up = pPlanet / max(r, 1e-6);
-                        float mu = clamp(dot(up, sunDir), -1.0, 1.0);
-                        r = clamp(r, skyUBO.Rg, skyUBO.Rt);
+                        float mu = clamp(dot(up, rd), -1.0, 1.0);
                         vec3 T = sampleTransmittance(r, mu);
                         vec3 sunRadiance = (sunSample.rgb * skyUBO.sunRadiance * T * sunSample.a);
                         mainRay.radiance += mix(sunRadiance, vec3(0.0), progress) * mainRay.throughput;
@@ -160,32 +184,24 @@ void main() {
 
             {
                 vec4 moonSample = evalMoonBillboard(rd);
-                vec3 nightCompensite = vec3(0.04, 0.05, 0.1);
 
-                if (moonSample.a > 0.0) {
-                    vec3 C = vec3(0.0, -skyUBO.Rg, 0.0);
-                    vec3 pWorld = gl_WorldRayOriginEXT;
-                    vec3 pPlanet = pWorld - C;
-
+                if (moonSample.a > 1e-4) {
                     float tG0, tG1;
                     bool hitGround = intersectSphere(pPlanet, rd, skyUBO.Rg, tG0, tG1);
-                    bool blocked = hitGround && (tG1 > 0.0);
+                    bool blocked = hitGround && (tG1 > 1e-3);
                     if (!blocked) {
-                        float r = length(pPlanet);
-                        vec3 up = pPlanet / max(r, 1e-6);
-                        float mu = clamp(dot(up, moonDir), -1.0, 1.0);
-                        r = clamp(r, skyUBO.Rg, skyUBO.Rt);
+                        float mu = clamp(dot(up, rd), -1.0, 1.0);
                         vec3 T = sampleTransmittance(r, mu);
-                        vec3 moonRadiance = (moonSample.rgb * T * moonSample.a);
-                        mainRay.radiance += mix(moonRadiance, vec3(nightCompensite), progress) * mainRay.throughput;
+                        T = max(T, vec3(0.03));
+                        vec3 moonRadiance = (moonSample.rgb * skyUBO.moonRadiance);
+                        moonRadiance *= T;
+                        mainRay.radiance += mix(moonRadiance, vec3(0.0), progress) * mainRay.throughput;
                     }
-                } else {
-                    mainRay.radiance += nightCompensite * mainRay.throughput;
                 }
             }
         }
 
-        mainRay.stop = 1;
+        raySetStop(mainRay, true);
         mainRay.hitT = INF_DISTANCE;
     }
 }

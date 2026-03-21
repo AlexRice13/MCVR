@@ -2,6 +2,7 @@
 
 #include "core/render/buffers.hpp"
 #include "core/render/render_framework.hpp"
+#include "core/vulkan/vertex.hpp"
 #include "core/render/renderer.hpp"
 
 #include <algorithm>
@@ -17,7 +18,8 @@ ChunkBuildData::ChunkBuildData(int64_t id,
                                uint32_t allIndexCount,
                                uint32_t geometryCount,
                                std::vector<World::GeometryTypes> &&geometryTypes,
-                               std::vector<std::vector<vk::VertexFormat::PBRTriangle>> &&vertices,
+                               std::vector<std::string> &&geometryGroupNames,
+                               std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                                std::vector<std::vector<uint32_t>> &&indices)
     : id(id),
       x(x),
@@ -28,6 +30,7 @@ ChunkBuildData::ChunkBuildData(int64_t id,
       allIndexCount(allIndexCount),
       geometryCount(geometryCount),
       geometryTypes(std::move(geometryTypes)),
+      geometryGroupNames(std::move(geometryGroupNames)),
       vertices(std::move(vertices)),
       indices(std::move(indices)),
       blas(nullptr),
@@ -41,7 +44,7 @@ void ChunkBuildData::build() {
 
     for (int i = 0; i < geometryCount; i++) {
         auto vertexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle),
+            vk::DeviceLocalBuffer::create(vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRVertex),
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -55,12 +58,26 @@ void ChunkBuildData::build() {
                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         indexBuffer->uploadToStagingBuffer(indices[i].data());
         indexBuffers.push_back(indexBuffer);
+
+        auto positionVertices = vk::Vertex::buildPositionVertices(vertices[i]);
+        auto positionBuffer = vk::DeviceLocalBuffer::create(
+            vma, device, positionVertices.size() * sizeof(vk::VertexFormat::PositionVertex),
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        positionBuffer->uploadToStagingBuffer(positionVertices.data());
+        positionBuffers.push_back(positionBuffer);
+
+        auto materialVertices = vk::Vertex::buildMaterialVertices(vertices[i]);
+        auto materialBuffer = vk::DeviceLocalBuffer::create(
+            vma, device, materialVertices.size() * sizeof(vk::VertexFormat::MaterialVertex),
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        materialBuffer->uploadToStagingBuffer(materialVertices.data());
+        materialBuffers.push_back(materialBuffer);
     }
 
     blasBuilder = vk::BLASBuilder::create();
     auto blasGeometryBuilder = blasBuilder->beginGeometries();
     for (int i = 0; i < geometryCount; i++) {
-        blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
+        blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRVertex>(
             vertexBuffers[i], vertices[i].size(), indexBuffers[i], indices[i].size(),
             geometryTypes[i] == World::WORLD_SOLID);
     }
@@ -197,6 +214,8 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                 for (int i = 0; i < chunkBuildData->geometryCount; i++) {
                     chunkBuildData->vertexBuffers[i]->uploadToBuffer(worldAsyncBuffer);
                     chunkBuildData->indexBuffers[i]->uploadToBuffer(worldAsyncBuffer);
+                    chunkBuildData->positionBuffers[i]->uploadToBuffer(worldAsyncBuffer);
+                    chunkBuildData->materialBuffers[i]->uploadToBuffer(worldAsyncBuffer);
                 }
             }
 
@@ -206,7 +225,8 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                     bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
                         .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                         .srcQueueFamilyIndex = secondaryQueueIndex,
                         .dstQueueFamilyIndex = secondaryQueueIndex,
@@ -216,11 +236,32 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                     bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
                         .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                         .srcQueueFamilyIndex = secondaryQueueIndex,
                         .dstQueueFamilyIndex = secondaryQueueIndex,
                         .buffer = chunkBuildData->indexBuffers[i],
+                    });
+
+                    bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
+                        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .srcQueueFamilyIndex = secondaryQueueIndex,
+                        .dstQueueFamilyIndex = secondaryQueueIndex,
+                        .buffer = chunkBuildData->positionBuffers[i],
+                    });
+
+                    bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
+                        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .srcQueueFamilyIndex = secondaryQueueIndex,
+                        .dstQueueFamilyIndex = secondaryQueueIndex,
+                        .buffer = chunkBuildData->materialBuffers[i],
                     });
                 }
                 worldAsyncBuffer->barriersBufferImage(bufferBarriers, {});
@@ -294,6 +335,14 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
         gc.collect(indexBuffers);
         indexBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers));
+
+        gc.collect(positionBuffers);
+        positionBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
+            std::move(chunkBuildData->positionBuffers));
+
+        gc.collect(materialBuffers);
+        materialBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
+            std::move(chunkBuildData->materialBuffers));
     } else {
         gc.collect(chunkBuildData->blas);
 
@@ -302,14 +351,21 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
         gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers)));
+
+        gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
+            std::move(chunkBuildData->positionBuffers)));
+
+        gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
+            std::move(chunkBuildData->materialBuffers)));
     }
 
     allVertexCount = chunkBuildData->allVertexCount;
     allIndexCount = chunkBuildData->allIndexCount;
     geometryCount = chunkBuildData->geometryCount;
     geometryTypes = std::make_shared<std::vector<World::GeometryTypes>>(std::move(chunkBuildData->geometryTypes));
+    geometryGroupNames = std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryGroupNames));
     vertices =
-        std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>>(std::move(chunkBuildData->vertices));
+        std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRVertex>>>(std::move(chunkBuildData->vertices));
     indices = std::make_shared<std::vector<std::vector<uint32_t>>>(std::move(chunkBuildData->indices));
 }
 
@@ -329,6 +385,12 @@ void Chunk1::invalidate() {
 
     gc.collect(indexBuffers);
     indexBuffers = nullptr;
+
+    gc.collect(positionBuffers);
+    positionBuffers = nullptr;
+
+    gc.collect(materialBuffers);
+    materialBuffers = nullptr;
 }
 
 std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
@@ -339,10 +401,13 @@ std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
     ret->blas = blas;
     ret->vertexBuffers = vertexBuffers;
     ret->indexBuffers = indexBuffers;
+    ret->positionBuffers = positionBuffers;
+    ret->materialBuffers = materialBuffers;
     ret->allVertexCount = allVertexCount;
     ret->allIndexCount = allIndexCount;
     ret->geometryCount = geometryCount;
     ret->geometryTypes = geometryTypes;
+    ret->geometryGroupNames = geometryGroupNames;
     ret->vertices = vertices;
     ret->indices = indices;
 
@@ -425,20 +490,26 @@ void Chunks::invalidateChunk(int id) {
 void Chunks::queueChunkBuild(ChunkBuildTask task) {
     uint32_t allVertexCount = 0, allIndexCount = 0;
     std::vector<World::GeometryTypes> geometryTypes;
-    std::vector<std::vector<vk::VertexFormat::PBRTriangle>> vertices;
+    std::vector<std::string> geometryGroupNames;
+    std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
 
     for (int i = 0; i < task.geometryCount; i++) {
         World::GeometryTypes geometryType = static_cast<World::GeometryTypes>(task.geometryTypes[i]);
         int geometryTexture = task.geometryTextures[i];
         geometryTypes.push_back(geometryType);
+        if (task.geometryGroupNames != nullptr && task.geometryGroupNames[i] != nullptr) {
+            geometryGroupNames.emplace_back(task.geometryGroupNames[i]);
+        } else {
+            geometryGroupNames.emplace_back("default");
+        }
 
         auto &geometryVertices = vertices.emplace_back();
         auto &geometryIndices = indices.emplace_back();
 
         geometryVertices.resize(task.vertexCounts[i]);
         std::memcpy(geometryVertices.data(), task.vertices[i],
-                    task.vertexCounts[i] * sizeof(vk::VertexFormat::PBRTriangle));
+                    task.vertexCounts[i] * sizeof(vk::VertexFormat::PBRVertex));
 
         for (int j = 0; j < task.vertexCounts[i]; j += 4) {
             geometryIndices.push_back(j + 0);
@@ -462,13 +533,16 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
 
     std::shared_ptr<ChunkBuildData> chunkBuildData = ChunkBuildData::create(
         task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++, allVertexCount, allIndexCount,
-        task.geometryCount, std::move(geometryTypes), std::move(vertices), std::move(indices));
+        task.geometryCount, std::move(geometryTypes), std::move(geometryGroupNames), std::move(vertices),
+        std::move(indices));
 
     if (task.isImportant) {
         chunkBuildData->build();
         for (int i = 0; i < chunkBuildData->geometryCount; i++) {
             Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->vertexBuffers[i],
                                                                       chunkBuildData->indexBuffers[i]);
+            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->positionBuffers[i]);
+            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->materialBuffers[i]);
         }
         importantBLASBuilders_->push_back(chunkBuildData->blasBuilder);
 
@@ -493,7 +567,16 @@ bool Chunks::isChunkReady(int64_t id) {
 
 void Chunks::close() {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (chunkBuildScheduler_ != nullptr) {
+        chunkBuildScheduler_->waitAllBatchesFinish();
+        chunkBuildScheduler_ = nullptr;
+    }
+
     queuedIndex_.clear();
+    chunkBuildDatas_.clear();
+    importantBLASBuilders_ = nullptr;
+    chunkPackedData_ = nullptr;
+    chunks_.clear();
 }
 
 std::recursive_mutex &Chunks::mutex() {

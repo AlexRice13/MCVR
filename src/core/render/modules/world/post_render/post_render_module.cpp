@@ -6,6 +6,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <random>
 
 PostRenderModule::PostRenderModule() {}
@@ -61,7 +63,37 @@ bool PostRenderModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     return true;
 }
 
-void PostRenderModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {}
+void PostRenderModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
+    auto parseUint = [](const std::string &value, uint32_t fallback) {
+        try {
+            const long long parsed = std::stoll(value);
+            if (parsed < 0LL) { return fallback; }
+            return static_cast<uint32_t>(std::min<long long>(parsed, std::numeric_limits<uint32_t>::max()));
+        } catch (...) { return fallback; }
+    };
+    auto parseFloat = [](const std::string &value, float fallback) {
+        try {
+            return std::stof(value);
+        } catch (...) { return fallback; }
+    };
+
+    for (int i = 0; i < attributeCount; i++) {
+        const std::string &key = attributeKVs[2 * i];
+        const std::string &value = attributeKVs[2 * i + 1];
+
+        if (key == "render_pipeline.module.post_render.attribute.star_count") {
+            starCount_ = std::max(1u, parseUint(value, starCount_));
+        } else if (key == "render_pipeline.module.post_render.attribute.star_min_size") {
+            starSizeMin_ = std::max(0.001f, parseFloat(value, starSizeMin_));
+        } else if (key == "render_pipeline.module.post_render.attribute.star_max_size") {
+            starSizeMax_ = std::max(0.001f, parseFloat(value, starSizeMax_));
+        } else if (key == "render_pipeline.module.post_render.attribute.star_radius") {
+            starRadius_ = std::max(1.0f, parseFloat(value, starRadius_));
+        }
+    }
+
+    if (starSizeMin_ > starSizeMax_) { std::swap(starSizeMin_, starSizeMax_); }
+}
 
 void PostRenderModule::build() {
     auto framework = framework_.lock();
@@ -212,8 +244,8 @@ static inline glm ::vec3 sampleUnitSphere(std::mt19937 &rng) {
     return glm::vec3(x, y, z);
 }
 
-static inline vk::VertexFormat::PBRTriangle makeStarVertex(const glm ::vec3 dir, const glm ::vec4 color) {
-    vk::VertexFormat::PBRTriangle v{};
+static inline vk::VertexFormat::PBRVertex makeStarVertex(const glm ::vec3 dir, const glm ::vec4 color) {
+    vk::VertexFormat::PBRVertex v{};
     v.pos = dir;
     v.useColorLayer = 1;
     v.colorLayer = color;
@@ -231,19 +263,21 @@ void PostRenderModule::initBuffers() {
     const float cosSun = std::cos(sunCone);
     const float cosMoon = std::cos(moonCone);
     uint32_t seed = 12345;
-    uint32_t starCount = 3000;
-    float starSizeMin = 0.5;
-    float starSizeMax = 0.7;
-    float starRadius = 400;
+    constexpr float starSizeReferenceHeight = 1440.0f;
+    const float starResolutionScale =
+        std::clamp(starSizeReferenceHeight / static_cast<float>(std::max(height_, 1u)), 0.25f, 8.0f);
+
+    const uint32_t starCount = std::max(1u, starCount_);
+    const float starSizeMin = std::max(0.001f, starSizeMin_ * starResolutionScale);
+    const float starSizeMax = std::max(starSizeMin, starSizeMax_ * starResolutionScale);
+    const float starRadius = std::max(1.0f, starRadius_);
 
     std::mt19937 rng(seed);
 
-    std::vector<vk::VertexFormat::PBRTriangle> verts;
+    std::vector<vk::VertexFormat::PBRVertex> verts;
     verts.reserve((size_t)starCount * 6);
 
-    const float half = 0.5f * (starSizeMin + rand01(rng) * (starSizeMax - starSizeMin));
-
-    for (int i = 0; i < starCount; i++) {
+    for (uint32_t i = 0; i < starCount; i++) {
         glm ::vec3 dir{};
         for (;;) {
             dir = sampleUnitSphere(rng);
@@ -272,6 +306,7 @@ void PostRenderModule::initBuffers() {
         glm::vec4 color(baseRGB * brightness, 1.0f);
 
         glm::vec3 center = dir * starRadius;
+        const float half = 0.5f * (starSizeMin + rand01(rng) * (starSizeMax - starSizeMin));
 
         glm::vec3 ref = (std::abs(dir.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(0, 0, 1);
         glm::vec3 t1 = glm::normalize(glm::cross(ref, dir));
@@ -295,7 +330,7 @@ void PostRenderModule::initBuffers() {
     }
 
     starFieldVertexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, verts.size() * sizeof(vk::VertexFormat::PBRTriangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        vma, device, verts.size() * sizeof(vk::VertexFormat::PBRVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 
     starFieldVertexBuffer->uploadToStagingBuffer(verts.data());
 
@@ -568,7 +603,7 @@ void PostRenderModule::initPipeline() {
                              .defineShaderStage(worldPostVertShader_, VK_SHADER_STAGE_VERTEX_BIT)
                              .defineShaderStage(worldPostFragShader_, VK_SHADER_STAGE_FRAGMENT_BIT)
                              .endShaderStage()
-                             .defineVertexInputState<vk::VertexFormat::PBRTriangle>()
+                             .defineVertexInputState<vk::VertexFormat::PBRVertex>()
                              .defineViewportScissorState({
                                  .viewport =
                                      {
@@ -628,7 +663,7 @@ void PostRenderModule::initPipeline() {
                                       .defineShaderStage(worldPostStarFieldVertShader_, VK_SHADER_STAGE_VERTEX_BIT)
                                       .defineShaderStage(worldPostStarFieldFragShader_, VK_SHADER_STAGE_FRAGMENT_BIT)
                                       .endShaderStage()
-                                      .defineVertexInputState<vk::VertexFormat::PBRTriangle>()
+                                      .defineVertexInputState<vk::VertexFormat::PBRVertex>()
                                       .defineViewportScissorState({
                                           .viewport =
                                               {
@@ -1135,7 +1170,7 @@ void PostRenderModuleContext::render() {
         ->bindGraphicsPipeline(module->worldPostStarFieldPipeline_)
 
         ->bindVertexBuffers(module->starFieldVertexBuffer)
-        ->draw(module->starFieldVertexBuffer->size() / sizeof(vk::VertexFormat::PBRTriangle), 1);
+        ->draw(module->starFieldVertexBuffer->size() / sizeof(vk::VertexFormat::PBRVertex), 1);
 
     worldCommandBuffer->endRenderPass();
 #ifdef USE_AMD

@@ -26,6 +26,18 @@ class Atmosphere : public SharedObject<Atmosphere> {
 
     void build();
 
+    void setPlanetRadius(float value);
+    void setAtmosphereTopRadius(float value);
+    void setRayleighScaleHeight(float value);
+    void setMieScaleHeight(float value);
+    void setRayleighScatteringCoefficient(const glm::vec3 &value);
+    void setMieAnisotropy(float value);
+    void setMieScatteringCoefficient(const glm::vec3 &value);
+    void setMinimumViewCosine(float value);
+    void setSunRadiance(const glm::vec3 &value);
+    void setMoonRadiance(const glm::vec3 &value);
+    void applyToSkyUbo(vk::Data::SkyUBO &ubo) const;
+
   private:
     void initDescriptorTables();
     void initImages();
@@ -58,6 +70,17 @@ class Atmosphere : public SharedObject<Atmosphere> {
     std::shared_ptr<vk::RenderPass> atmCubeMapRenderPass_;
     std::vector<std::array<std::shared_ptr<vk::Framebuffer>, 6>> atmCubeMapFramebuffers_;
     std::shared_ptr<vk::GraphicsPipeline> atmCubeMapPipeline_;
+
+    float planetRadius_ = 6360000.0f;
+    float atmosphereTopRadius_ = 6460000.0f;
+    float rayleighScaleHeight_ = 8000.0f;
+    float mieScaleHeight_ = 1200.0f;
+    glm::vec3 rayleighScatteringCoefficient_ = glm::vec3(5.802e-6f, 13.558e-6f, 33.100e-6f);
+    float mieAnisotropy_ = 0.80f;
+    glm::vec3 mieScatteringCoefficient_ = glm::vec3(21.000e-6f, 21.000e-6f, 21.000e-6f);
+    float minimumViewCosine_ = 0.02f;
+    glm::vec3 sunRadiance_ = glm::vec3(16.0f);
+    glm::vec3 moonRadiance_ = glm::vec3(0.08f, 0.1f, 0.2f);
 
     std::vector<std::shared_ptr<AtmosphereContext>> contexts_;
 };

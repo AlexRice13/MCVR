@@ -1,6 +1,7 @@
 #include "core/vulkan/device.hpp"
 
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
+#include "core/render/modules/world/xess_upscaler/xess_wrapper.hpp"
 #include "core/vulkan/instance.hpp"
 #include "core/vulkan/physical_device.hpp"
 
@@ -22,18 +23,26 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                    std::shared_ptr<PhysicalDevice> physicalDevice)
     : instance_(instance), window_(window), physicalDevice_(physicalDevice) {
     // enabled device extensions
-    std::vector<const char *> enabledExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                                                   VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-                                                   VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-                                                   VK_KHR_SPIRV_1_4_EXTENSION_NAME,
-                                                   VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-                                                   VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-                                                   VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
-                                                   VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
-                                                   VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,
-                                                   VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
-                                                   VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
-                                                   VK_KHR_MAINTENANCE_5_EXTENSION_NAME};
+    std::vector<const char *> enabledExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+        VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,
+        VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
+        // VK_KHR_MAINTENANCE_5_EXTENSION_NAME,
+    };
+    std::vector<std::string> dlssRequiredExtensions;
+    bool dlssRequirementQuerySuccess = false;
+#ifdef MCVR_ENABLE_XESS
+    std::vector<std::string> xessRequiredExtensions;
+    bool xessRequirementQuerySuccess = false;
+#endif
 
     std::vector<VkExtensionProperties> dlssExtensions;
     NVSDK_NGX_Result dlssResult =
@@ -41,18 +50,40 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     if (NVSDK_NGX_FAILED(dlssResult)) {
         deviceCerr() << "dlss device extensions unavailable; skipping." << std::endl;
     } else {
+        dlssRequirementQuerySuccess = true;
 #ifdef DEBUG
         deviceCout() << "dlss instance extensions:" << std::endl;
 #endif
-        for (int i = 0; i < dlssExtensions.size(); i++) {
-            if (std::strcmp(dlssExtensions[i].extensionName, "VK_EXT_buffer_device_address") == 0)
+        for (const auto &dlssExtension : dlssExtensions) {
+            dlssRequiredExtensions.emplace_back(dlssExtension.extensionName);
+            if (std::strcmp(dlssExtension.extensionName, "VK_EXT_buffer_device_address") == 0)
                 continue; // already enabled using PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
 #ifdef DEBUG
-            deviceCout() << "\t" << dlssExtensions[i].extensionName << std::endl;
+            deviceCout() << "\t" << dlssExtension.extensionName << std::endl;
 #endif
-            enabledExtensions.push_back(dlssExtensions[i].extensionName);
+            enabledExtensions.push_back(dlssExtension.extensionName);
         }
     }
+
+#ifdef MCVR_ENABLE_XESS
+    std::vector<const char *> xessExtensions;
+    if (mcvr::XeSSWrapper::getRequiredDeviceExtensions(instance_->vkInstance(), physicalDevice_->vkPhysicalDevice(),
+                                                       xessExtensions)) {
+        xessRequirementQuerySuccess = true;
+#    ifdef DEBUG
+        deviceCout() << "xess device extensions:" << std::endl;
+#    endif
+        for (const char *extension : xessExtensions) {
+            xessRequiredExtensions.emplace_back(extension);
+#    ifdef DEBUG
+            deviceCout() << "\t" << extension << std::endl;
+#    endif
+            enabledExtensions.push_back(extension);
+        }
+    } else {
+        deviceCerr() << "xess device extensions unavailable; skipping." << std::endl;
+    }
+#endif
 
     uint32_t deviceExtensionCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice_->vkPhysicalDevice(), nullptr, &deviceExtensionCount, nullptr);
@@ -63,6 +94,35 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     std::unordered_set<std::string> supportedExtensions;
     supportedExtensions.reserve(deviceExtensions.size());
     for (const auto &ext : deviceExtensions) { supportedExtensions.insert(ext.extensionName); }
+
+    if (supportedExtensions.find(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME) != supportedExtensions.end()) {
+        enabledExtensions.push_back(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
+    }
+
+    auto areRequiredExtensionsSupported = [&](const std::vector<std::string> &requiredExtensions) {
+        for (const auto &requiredExtension : requiredExtensions) {
+            if (requiredExtension == "VK_EXT_buffer_device_address") {
+                // Covered by Vulkan 1.2 buffer device address feature path
+                continue;
+            }
+            if (supportedExtensions.find(requiredExtension) == supportedExtensions.end()) { return false; }
+        }
+        return true;
+    };
+
+    dlssDeviceExtensionsCompatible_ = instance_->isDlssInstanceExtensionsCompatible() && dlssRequirementQuerySuccess &&
+                                      areRequiredExtensionsSupported(dlssRequiredExtensions);
+    if (!dlssDeviceExtensionsCompatible_) {
+        deviceCerr() << "dlss device extension requirements are not fully satisfied." << std::endl;
+    }
+
+#ifdef MCVR_ENABLE_XESS
+    xessDeviceExtensionsCompatible_ = instance_->isXessInstanceExtensionsCompatible() && xessRequirementQuerySuccess &&
+                                      areRequiredExtensionsSupported(xessRequiredExtensions);
+    if (!xessDeviceExtensionsCompatible_) {
+        deviceCerr() << "xess device extension requirements are not fully satisfied." << std::endl;
+    }
+#endif
 
     std::vector<const char *> filteredExtensions;
     filteredExtensions.reserve(enabledExtensions.size());
@@ -85,9 +145,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     VkPhysicalDeviceMaintenance5Features supportedMaintenance5{};
     supportedMaintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES;
 
+    VkPhysicalDeviceCoherentMemoryFeaturesAMD supportedCoherentMemoryFeatures{};
+    supportedCoherentMemoryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD;
+    supportedCoherentMemoryFeatures.pNext = &supportedMaintenance5;
+
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT supportedVertexInputDynamicState{};
     supportedVertexInputDynamicState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT;
-    supportedVertexInputDynamicState.pNext = &supportedMaintenance5;
+    supportedVertexInputDynamicState.pNext = &supportedCoherentMemoryFeatures;
 
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT supportedExtendedDynamicState3{};
     supportedExtendedDynamicState3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
@@ -101,9 +165,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     supportedVulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     supportedVulkan13.pNext = &supportedExtendedDynamicState2;
 
+    VkPhysicalDeviceVulkan11Features supportedVulkan11{};
+    supportedVulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    supportedVulkan11.pNext = &supportedVulkan13;
+
     VkPhysicalDeviceVulkan12Features supportedVulkan12{};
     supportedVulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    supportedVulkan12.pNext = &supportedVulkan13;
+    supportedVulkan12.pNext = &supportedVulkan11;
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAccelerationStructureFeatures{};
     supportedAccelerationStructureFeatures.sType =
@@ -131,9 +199,16 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     maintenance5Features.maintenance5 =
         hasExtension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME) ? supportedMaintenance5.maintenance5 : VK_FALSE;
 
+    VkPhysicalDeviceCoherentMemoryFeaturesAMD coherentMemoryFeatures{};
+    coherentMemoryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD;
+    coherentMemoryFeatures.pNext = &maintenance5Features;
+    coherentMemoryFeatures.deviceCoherentMemory = hasExtension(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME) ?
+                                                      supportedCoherentMemoryFeatures.deviceCoherentMemory :
+                                                      VK_FALSE;
+
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertexInputDynamicState{};
     vertexInputDynamicState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT;
-    vertexInputDynamicState.pNext = &maintenance5Features;
+    vertexInputDynamicState.pNext = &coherentMemoryFeatures;
     vertexInputDynamicState.vertexInputDynamicState = hasExtension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) ?
                                                           supportedVertexInputDynamicState.vertexInputDynamicState :
                                                           VK_FALSE;
@@ -189,15 +264,22 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     vulkan13Features.shaderDemoteToHelperInvocation = supportedVulkan13.shaderDemoteToHelperInvocation;
     vulkan13Features.synchronization2 = supportedVulkan13.synchronization2;
 
+    VkPhysicalDeviceVulkan11Features vulkan11Features{};
+    vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    vulkan11Features.pNext = &vulkan13Features;
+    vulkan11Features.storageBuffer16BitAccess = supportedVulkan11.storageBuffer16BitAccess;
+
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    vulkan12Features.pNext = &vulkan13Features;
+    vulkan12Features.pNext = &vulkan11Features;
     vulkan12Features.bufferDeviceAddress = supportedVulkan12.bufferDeviceAddress;
     vulkan12Features.descriptorBindingUpdateUnusedWhilePending =
         supportedVulkan12.descriptorBindingUpdateUnusedWhilePending;
     vulkan12Features.descriptorBindingPartiallyBound = supportedVulkan12.descriptorBindingPartiallyBound;
     vulkan12Features.descriptorIndexing = supportedVulkan12.descriptorIndexing;
     vulkan12Features.runtimeDescriptorArray = supportedVulkan12.runtimeDescriptorArray;
+    vulkan12Features.descriptorBindingVariableDescriptorCount =
+        supportedVulkan12.descriptorBindingVariableDescriptorCount;
     vulkan12Features.shaderSampledImageArrayNonUniformIndexing =
         supportedVulkan12.shaderSampledImageArrayNonUniformIndexing;
     vulkan12Features.descriptorBindingUniformBufferUpdateAfterBind =
@@ -209,6 +291,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     vulkan12Features.descriptorBindingStorageBufferUpdateAfterBind =
         supportedVulkan12.descriptorBindingStorageBufferUpdateAfterBind;
     vulkan12Features.shaderFloat16 = supportedVulkan12.shaderFloat16;
+    vulkan12Features.shaderBufferInt64Atomics = supportedVulkan12.shaderBufferInt64Atomics;
+    vulkan12Features.shaderStorageBufferArrayNonUniformIndexing =
+        supportedVulkan12.shaderStorageBufferArrayNonUniformIndexing;
+    vulkan12Features.shaderStorageImageArrayNonUniformIndexing =
+        supportedVulkan12.shaderStorageImageArrayNonUniformIndexing;
+    vulkan12Features.shaderUniformBufferArrayNonUniformIndexing =
+        supportedVulkan12.shaderUniformBufferArrayNonUniformIndexing;
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {};
     accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -236,11 +325,24 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     features.shaderInt64 = supportedFeatures2.features.shaderInt64;
     features.shaderFloat64 = supportedFeatures2.features.shaderFloat64;
     features.shaderInt16 = supportedFeatures2.features.shaderInt16;
+    features.shaderStorageImageReadWithoutFormat = supportedFeatures2.features.shaderStorageImageReadWithoutFormat;
+    features.shaderStorageImageWriteWithoutFormat = supportedFeatures2.features.shaderStorageImageWriteWithoutFormat;
 
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &rayTracingFeatures;
     features2.features = features;
+
+#ifdef MCVR_ENABLE_XESS
+    if (xessDeviceExtensionsCompatible_) {
+        void *featureChain = &features2;
+        if (!mcvr::XeSSWrapper::getRequiredDeviceFeatures(instance_->vkInstance(), physicalDevice_->vkPhysicalDevice(),
+                                                          &featureChain)) {
+            xessDeviceExtensionsCompatible_ = false;
+            deviceCerr() << "xess device feature requirements are not fully satisfied." << std::endl;
+        }
+    }
+#endif
 
     // create logical device
     VkDeviceCreateInfo deviceCreateInfo = {};
@@ -304,7 +406,11 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 }
 
 vk::Device::~Device() {
-    vkDestroyDevice(device_, nullptr);
+    if (device_ != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device_);
+        vkDestroyDevice(device_, nullptr);
+        device_ = VK_NULL_HANDLE;
+    }
 
 #ifdef DEBUG
     deviceCout() << "device deconstructed" << std::endl;
@@ -321,4 +427,16 @@ VkQueue &vk::Device::mainVkQueue() {
 
 VkQueue &vk::Device::secondaryQueue() {
     return secondaryQueue_;
+}
+
+bool vk::Device::hasExtendedDynamicState2LogicOp() const {
+    return extendedDynamicState2LogicOp_;
+}
+
+bool vk::Device::isDlssDeviceExtensionsCompatible() const {
+    return dlssDeviceExtensionsCompatible_;
+}
+
+bool vk::Device::isXessDeviceExtensionsCompatible() const {
+    return xessDeviceExtensionsCompatible_;
 }

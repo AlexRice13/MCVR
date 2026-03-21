@@ -144,8 +144,26 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        uint32_t height,
                                        uint32_t layer,
                                        VkFormat format,
-                                       VkImageUsageFlags usage)
-    : vk::DeviceLocalImage(device, vma, true, width, height, layer, format, usage) {}
+                                       VkImageUsageFlags usage
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
+    : vk::DeviceLocalImage(device,
+                           vma,
+                           true,
+                           width,
+                           height,
+                           layer,
+                           format,
+                           usage
+#ifdef DEBUG
+                           ,
+                           debugName
+#endif
+      ) {
+}
 
 vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        std::shared_ptr<VMA> vma,
@@ -154,9 +172,29 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        uint32_t height,
                                        uint32_t layer,
                                        VkFormat format,
-                                       VkImageUsageFlags usage)
-    : vk::DeviceLocalImage(
-          device, vma, persistStaging, width, height, layer, format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE) {}
+                                       VkImageUsageFlags usage
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
+    : vk::DeviceLocalImage(device,
+                           vma,
+                           persistStaging,
+                           width,
+                           height,
+                           layer,
+                           format,
+                           usage,
+                           0,
+                           VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                           0
+#ifdef DEBUG
+                           ,
+                           debugName
+#endif
+      ) {
+}
 
 
 vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
@@ -169,7 +207,12 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        VkImageUsageFlags usage,
                                        VmaAllocationCreateFlags allocationFlags,
                                        VmaMemoryUsage vmaUsage,
-                                       VkImageCreateFlags imageCreateFlags)
+                                       VkImageCreateFlags imageCreateFlags
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
     : DeviceLocalImage(device,
                        vma,
                        persistStaging,
@@ -181,7 +224,13 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                        usage,
                        allocationFlags,
                        vmaUsage,
-                       imageCreateFlags) {}
+                       imageCreateFlags
+#ifdef DEBUG
+                       ,
+                       debugName
+#endif
+      ) {
+}
 
 vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        std::shared_ptr<VMA> vma,
@@ -194,7 +243,12 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        VkImageUsageFlags usage,
                                        VmaAllocationCreateFlags allocationFlags,
                                        VmaMemoryUsage vmaUsage,
-                                       VkImageCreateFlags imageCreateFlags)
+                                       VkImageCreateFlags imageCreateFlags
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
     : device_(device),
       vma_(vma),
       width_(width),
@@ -204,7 +258,12 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
       persistStaging_(persistStaging),
       usage_(usage),
       allocationFlags_(allocationFlags),
-      vmaUsage_(vmaUsage) {
+      vmaUsage_(vmaUsage)
+#ifdef DEBUG
+      ,
+      debugName(debugName)
+#endif
+{
 #ifdef DEBUG
     imageCout() << "Creating image with width: " << width << " height: " << height << " layer: " << layer
                 << " channel: " << vk::formatToByte(format) << " mip level: " << mipLevels
@@ -273,6 +332,10 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
         imageCerr() << "failed to create image view for image" << std::endl;
         exit(EXIT_FAILURE);
     }
+
+#ifdef DEBUG
+    imageCout() << "device local image (" << debugName << ") init" << std::endl;
+#endif
 }
 
 vk::DeviceLocalImage::~DeviceLocalImage() {
@@ -281,7 +344,7 @@ vk::DeviceLocalImage::~DeviceLocalImage() {
     vmaDestroyImage(vma_->allocator(), image_, allocation_);
 
 #ifdef DEBUG
-    imageCout() << "device local image deconstructed" << std::endl;
+    imageCout() << "device local image (" << debugName << ") deconstructed" << std::endl;
 #endif
 }
 

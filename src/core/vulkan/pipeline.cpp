@@ -342,16 +342,16 @@ std::shared_ptr<vk::RayTracingPipeline> vk::RayTracingPipelineBuilder::build(std
     pipelineInfo.groupCount = shaderGroupBuilder_.shaderGroupCreateInfos.size();
     pipelineInfo.pGroups = shaderGroupBuilder_.shaderGroupCreateInfos.data();
     pipelineInfo.layout = pipelineLayout_;
-    pipelineInfo.maxPipelineRayRecursionDepth = 16;
+    pipelineInfo.maxPipelineRayRecursionDepth = 3;
 
-    VkPipeline rtPipeline;
+    VkPipeline rayTracingPipeline;
     if (vkCreateRayTracingPipelinesKHR(device->vkDevice(), VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-                                       &rtPipeline) != VK_SUCCESS) {
+                                       &rayTracingPipeline) != VK_SUCCESS) {
         std::cerr << "Cannot build ray tracing pipeline" << std::endl;
         exit(EXIT_FAILURE);
     }
 
-    return RayTracingPipeline::create(device, rtPipeline);
+    return RayTracingPipeline::create(device, rayTracingPipeline);
 }
 
 vk::ComputePipelineBuilder &vk::ComputePipelineBuilder::defineShader(std::shared_ptr<vk::Shader> shader) {

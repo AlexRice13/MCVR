@@ -342,22 +342,24 @@ AtmosphereContext::AtmosphereContext(std::shared_ptr<FrameworkContext> framework
 
 void AtmosphereContext::render() {
     auto buffers = Renderer::instance().buffers();
+    auto module = atmosphere.lock();
+    if (module == nullptr) { return; }
+
+    auto skyBuffer = buffers->skyUniformBuffer();
+    if (skyBuffer == nullptr) { return; }
+    auto *skyUbo = reinterpret_cast<vk::Data::SkyUBO *>(skyBuffer->mappedPtr());
+    if (skyUbo != nullptr) { module->applyToSkyUbo(*skyUbo); }
 
     atmDescriptorTable->bindBuffer(buffers->worldUniformBuffer(), 1, 0);
-    atmDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 1, 1);
+    atmDescriptorTable->bindBuffer(skyBuffer, 1, 1);
 
     auto frameworkContextPtr = frameworkContext.lock();
     auto worldCommandBuffer = frameworkContextPtr->worldCommandBuffer;
     auto physicalDevice = frameworkContextPtr->physicalDevice;
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
 
-    auto module = atmosphere.lock();
-
-    auto chooseSrc = [](VkImageLayout oldLayout,
-                        VkPipelineStageFlags2 fallbackStage,
-                        VkAccessFlags2 fallbackAccess,
-                        VkPipelineStageFlags2 &outStage,
-                        VkAccessFlags2 &outAccess) {
+    auto chooseSrc = [](VkImageLayout oldLayout, VkPipelineStageFlags2 fallbackStage, VkAccessFlags2 fallbackAccess,
+                        VkPipelineStageFlags2 &outStage, VkAccessFlags2 &outAccess) {
         if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
             outStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
             outAccess = 0;
@@ -373,8 +375,7 @@ void AtmosphereContext::render() {
         VkAccessFlags2 lutSrcAccess = 0;
         chooseSrc(atmLUTImage->imageLayout(),
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  lutSrcStage, lutSrcAccess);
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, lutSrcStage, lutSrcAccess);
         worldCommandBuffer->barriersBufferImage(
             {}, {{
                     .srcStageMask = lutSrcStage,
@@ -413,15 +414,13 @@ void AtmosphereContext::render() {
         VkAccessFlags2 cubeSrcAccess = 0;
         chooseSrc(atmCubeMapImage->imageLayout(),
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  cubeSrcStage, cubeSrcAccess);
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, cubeSrcStage, cubeSrcAccess);
 
         VkPipelineStageFlags2 lutSrcStage = 0;
         VkAccessFlags2 lutSrcAccess = 0;
         chooseSrc(module->atmLUTImage_->imageLayout(),
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  lutSrcStage, lutSrcAccess);
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, lutSrcStage, lutSrcAccess);
         worldCommandBuffer->barriersBufferImage(
             {}, {{
                      .srcStageMask = cubeSrcStage,
@@ -441,8 +440,8 @@ void AtmosphereContext::render() {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = module->atmLUTImage_->imageLayout(),
-                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .srcQueueFamilyIndex = mainQueueIndex,
+                     .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = module->atmLUTImage_,
                      .subresourceRange = vk::wholeColorSubresourceRange,
@@ -470,4 +469,57 @@ void AtmosphereContext::render() {
             atmCubeMapImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
     }
+}
+
+void Atmosphere::setPlanetRadius(float value) {
+    planetRadius_ = value;
+}
+
+void Atmosphere::setAtmosphereTopRadius(float value) {
+    atmosphereTopRadius_ = value;
+}
+
+void Atmosphere::setRayleighScaleHeight(float value) {
+    rayleighScaleHeight_ = value;
+}
+
+void Atmosphere::setMieScaleHeight(float value) {
+    mieScaleHeight_ = value;
+}
+
+void Atmosphere::setRayleighScatteringCoefficient(const glm::vec3 &value) {
+    rayleighScatteringCoefficient_ = value;
+}
+
+void Atmosphere::setMieAnisotropy(float value) {
+    mieAnisotropy_ = value;
+}
+
+void Atmosphere::setMieScatteringCoefficient(const glm::vec3 &value) {
+    mieScatteringCoefficient_ = value;
+}
+
+void Atmosphere::setMinimumViewCosine(float value) {
+    minimumViewCosine_ = value;
+}
+
+void Atmosphere::setSunRadiance(const glm::vec3 &value) {
+    sunRadiance_ = value;
+}
+
+void Atmosphere::setMoonRadiance(const glm::vec3 &value) {
+    moonRadiance_ = value;
+}
+
+void Atmosphere::applyToSkyUbo(vk::Data::SkyUBO &ubo) const {
+    ubo.Rg = planetRadius_;
+    ubo.Rt = atmosphereTopRadius_;
+    ubo.Hr = rayleighScaleHeight_;
+    ubo.Hm = mieScaleHeight_;
+    ubo.betaR = rayleighScatteringCoefficient_;
+    ubo.mieG = mieAnisotropy_;
+    ubo.betaM = mieScatteringCoefficient_;
+    ubo.minViewCos = minimumViewCosine_;
+    ubo.sunRadiance = sunRadiance_;
+    ubo.moonRadiance = moonRadiance_;
 }

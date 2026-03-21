@@ -17,7 +17,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-
 /*
  * MODIFICATIONS and INTEGRATION:
  *
@@ -40,80 +39,101 @@
 
 #pragma once
 
+#include "common/shared.hpp"
+#include "common/singleton.hpp"
+#include "core/all_extern.hpp"
+
 #include <NRD.h>
-#include <map>
-#include <memory>
-#include <string>
-#include <vector>
-#include <volk.h>
 
-// Engine-level Vulkan abstractions (optional but used in current codebase)
-#include "core/render/buffers.hpp"
-#include "core/render/renderer.hpp"
+#include "core/render/render_framework.hpp"
 
-class NrdWrapper {
+#include <cstddef>
+#include <cstdint>
+
+class NrdWrapper : public SharedObject<NrdWrapper> {
   public:
-    NrdWrapper();
+    /* Create the Vulkan NRD Wrapper
+     * NrdWrapper does not automatically resize its resources and will have to get recreated if the size changes.
+     * However, it does support rendering to only a part of the images, as described in the NRD documentation
+     * regarding nrd::CommonSettings::resourceSize and nrd::CommonSettings::rectSize.
+     *
+     * The userTexturePool is a pool of textures that NRD uses as input and output data.
+     * Which textures are needed depends on the actual denoiser in use. Refer to NRDDescs.h
+     * to find out which textures are needed for which denoiser.
+     * To make it an easier interface, we use an array where each slot corresponds to one 'nrd::ResourceType'
+     * texture resource. Depending on the denoiser in use, this array will be sparsely populated.
+     * 'userTexturePool' (but NOT the textures it contains) will be copied into an internal copy
+     * and thus can be discarded after the call.
+     *
+     * NRD uses two internal pools of textures ("resources"): permanent and transient ones.
+     * Permanent textures must not be altered outside of NRD, while transient textures could be
+     * reused as (or aliased with) other application specific textures. Albeit, this wrapper
+     * does not expose the transient pool to the application and thus makes no use of reusing
+     * transient textures for other purposes.
+     */
+    NrdWrapper() = default;
     ~NrdWrapper();
 
-    bool init(std::shared_ptr<vk::Device> device,
-              std::shared_ptr<vk::VMA> vma,
-              std::shared_ptr<vk::PhysicalDevice> physicalDevice,
-              uint32_t width,
-              uint32_t height,
-              uint32_t contextCount);
+    void init(std::shared_ptr<Framework> framework,
+              uint16_t width,
+              uint16_t height);
 
-    void updateSettings(const nrd::CommonSettings &commonSettings, const nrd::ReblurSettings &reblurSettings);
+    void setUserPoolTexture(
+        std::shared_ptr<std::array<std::shared_ptr<vk::DeviceLocalImage>, size_t(nrd::ResourceType::MAX_NUM)>>
+            userTexturePool);
 
-    void denoise(VkCommandBuffer cmd,
-                 uint32_t frameIndex,
-                 const std::map<nrd::ResourceType, std::shared_ptr<vk::DeviceLocalImage>> &userTextures);
+    /* Set common NRD settings, typically called once per frame */
+    void setCommonSettings(nrd::CommonSettings &settings);
+
+    /* Denoiser specifc settings */
+    void setREBLURSettings(const nrd::ReblurSettings &ssettings);
+    void setRELAXSettings(const nrd::RelaxSettings &settings);
+
+    /* Perform the actual denoising. NRD will read from a number of 'IN_*' images in the user texture pool
+     * and write to the 'OUT_' images specified by the denoiser.
+     * Refer to NRDDescs.h for the per-denoiser input and output textures.
+     */
+    void denoise(const nrd::Identifier *denoisers, uint32_t denoisersNum, VkCommandBuffer &commandBuffer);
+
+    /* When the NRD library is compiled, it is hardcoded to a specific Normal/Roughness encoding.
+     * It requires to use a specific image format to store the encoded values.
+     */
+    static VkFormat getNormalRoughnessFormat();
 
   private:
     struct NRDPipeline {
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-        VkDescriptorSetLayout resourceSetLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout resourceDescriptorLayout = VK_NULL_HANDLE;
         uint32_t numBindings = 0;
     };
 
+    NrdWrapper(const NrdWrapper &) = delete;
+    NrdWrapper &operator=(const NrdWrapper) = delete;
+
+    std::shared_ptr<vk::DeviceLocalImage> createTexture(const nrd::TextureDesc &tDesc, uint16_t width, uint16_t height);
     void createPipelines();
-    bool createSamplers();
-    std::shared_ptr<vk::DeviceLocalImage>
-    createInternalTexture(const nrd::TextureDesc &tDesc, uint32_t width, uint32_t height);
-    void dispatch(VkCommandBuffer cmd, const nrd::DispatchDesc &dispatchDesc, uint32_t frameIndex);
+    void setDenoiserSettings(nrd::Identifier identifier, const void *settings);
+    void dispatch(VkCommandBuffer commandBuffer, const nrd::DispatchDesc &dispatchDesc);
 
-    nrd::Instance *m_nrdInstance = nullptr;
-    nrd::Identifier m_denoiserIdentifier = (nrd::Identifier)nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR;
-
-    std::shared_ptr<vk::Device> m_device;
-    std::shared_ptr<vk::PhysicalDevice> m_physicalDevice;
-    std::shared_ptr<vk::VMA> m_vma;
-
-    uint32_t m_width = 0;
-    uint32_t m_height = 0;
-    uint32_t m_contextCount = 0;
+    std::weak_ptr<Framework> framework_;
+    nrd::Instance *m_instance = nullptr;
 
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_permanentTextures;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_transientTextures;
-    std::shared_ptr<vk::DeviceLocalBuffer> m_constantBuffer;
-
-    std::vector<VkSampler> m_samplers;
+    std::shared_ptr<std::array<std::shared_ptr<vk::DeviceLocalImage>, size_t(nrd::ResourceType::MAX_NUM)>>
+        m_userTexturePool;
+    std::vector<VkSampler> m_vkSamplers;
+    std::vector<std::shared_ptr<vk::Sampler>> m_samplers;
+    std::shared_ptr<vk::HostVisibleBuffer> m_constantBuffer;
 
     std::vector<NRDPipeline> m_pipelines;
 
-    std::map<nrd::ResourceType, std::shared_ptr<vk::DeviceLocalImage>> m_userTexturePool;
-
-    uint32_t m_resourcesSpaceIndex = 0;
-    uint32_t m_samplersSpaceIndex = 1;
-    uint32_t m_constantBufferSpaceIndex = 1;
-    bool m_useSeparateSets = true;
-    bool m_usePushDescriptors = false;
-
-    VkDescriptorSetLayout m_samplerConstSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool m_samplerConstDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet m_samplerConstDescriptorSet = VK_NULL_HANDLE;
-
-    VkDescriptorPool m_resourceDescriptorPool = VK_NULL_HANDLE;
-    std::vector<std::vector<VkDescriptorSet>> m_resourceDescriptorSets;
+    // Vulkan doesn't let us create a pipeline layout with two sets that use
+    // push descriptors. So if NRD places immutable samplers in a different
+    // set, then we store its set (which does not require updates) here.
+    // We use a single one that will be shared among all pipelines.
+    VkDescriptorSetLayout m_samplerConstBufferDescriptorLayout;
+    VkDescriptorPool m_samplerConstBufferDescriptorPool;
+    VkDescriptorSet m_samplerConstBufferDescriptorSet;
 };

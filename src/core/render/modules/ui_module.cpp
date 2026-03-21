@@ -8,6 +8,12 @@
 
 UIModule::UIModule() {}
 
+UIModule::~UIModule() {
+#ifdef DEBUG
+    std::cout << "UI deconstruct" << std::endl;
+#endif
+}
+
 void UIModule::init(std::shared_ptr<Framework> framework) {
     framework_ = framework;
 
@@ -30,6 +36,10 @@ void UIModule::init(std::shared_ptr<Framework> framework) {
     for (int i = 0; i < size; i++) {
         contexts_[i] = UIModuleContext::create(framework->contexts()[i], shared_from_this());
     }
+
+#ifdef DEBUG
+    std::cout << "UI init" << std::endl;
+#endif
 }
 
 std::vector<std::shared_ptr<UIModuleContext>> &UIModule::contexts() {
@@ -267,6 +277,36 @@ void UIModule::initOverlayDrawPipelines() {
             .fragmentShader = vk::Shader::create(framework->device(), fragmentShaderFile),
         };
 
+#ifdef DEBUG
+        {
+            std::stringstream ss;
+            ss << "UI Draw Vertex Shader Type " << type;
+            std::string vertName = ss.str();
+
+            VkDebugUtilsObjectNameInfoEXT nameInfo = {};
+            nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+            nameInfo.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
+            nameInfo.objectHandle = (uint64_t)overlayDrawPipelineShaders_[type].vertexShader->vkShaderModule();
+            nameInfo.pObjectName = vertName.c_str();
+
+            vkSetDebugUtilsObjectNameEXT(framework->device()->vkDevice(), &nameInfo);
+        }
+
+        {
+            std::stringstream ss;
+            ss << "UI Draw Fragment Shader Type " << type;
+            std::string fragName = ss.str();
+
+            VkDebugUtilsObjectNameInfoEXT nameInfo = {};
+            nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+            nameInfo.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
+            nameInfo.objectHandle = (uint64_t)overlayDrawPipelineShaders_[type].fragmentShader->vkShaderModule();
+            nameInfo.pObjectName = fragName.c_str();
+
+            vkSetDebugUtilsObjectNameEXT(framework->device()->vkDevice(), &nameInfo);
+        }
+#endif
+
         vk::DynamicGraphicsPipelineBuilder builder{1};
         builder.defineRenderPass(overlayDrawRenderPass_, 0)
             .beginShaderStage()
@@ -401,6 +441,36 @@ void UIModule::initOverlayPostPipelines() {
             .vertexShader = vk::Shader::create(framework->device(), vertexShaderFile),
             .fragmentShader = vk::Shader::create(framework->device(), fragmentShaderFile),
         };
+
+#ifdef DEBUG
+        {
+            std::stringstream ss;
+            ss << "UI Post Vertex Shader Type " << type;
+            std::string vertName = ss.str();
+
+            VkDebugUtilsObjectNameInfoEXT nameInfo = {};
+            nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+            nameInfo.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
+            nameInfo.objectHandle = (uint64_t)overlayPostPipelineShaders_[type].vertexShader->vkShaderModule();
+            nameInfo.pObjectName = vertName.c_str();
+
+            vkSetDebugUtilsObjectNameEXT(framework->device()->vkDevice(), &nameInfo);
+        }
+
+        {
+            std::stringstream ss;
+            ss << "UI Post Fragment Shader Type " << type;
+            std::string fragName = ss.str();
+
+            VkDebugUtilsObjectNameInfoEXT nameInfo = {};
+            nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+            nameInfo.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
+            nameInfo.objectHandle = (uint64_t)overlayPostPipelineShaders_[type].fragmentShader->vkShaderModule();
+            nameInfo.pObjectName = fragName.c_str();
+
+            vkSetDebugUtilsObjectNameEXT(framework->device()->vkDevice(), &nameInfo);
+        }
+#endif
 
         overlayPostPipelines_[type] =
             vk::GraphicsPipelineBuilder{}

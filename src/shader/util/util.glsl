@@ -1,6 +1,8 @@
 #ifndef UTIL_GLSL
 #define UTIL_GLSL
 
+#include "color_space.glsl"
+
 vec2 computeCameraMotionVector(mat4 prevMVP, vec2 pixelCenter, vec4 motionOrigin) {
     highp vec4 oldPos = prevMVP * motionOrigin;
     oldPos.xy /= oldPos.w;

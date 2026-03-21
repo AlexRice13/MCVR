@@ -1,16 +1,12 @@
 #include "core/vulkan/instance.hpp"
 
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
+#include "core/render/modules/world/xess_upscaler/xess_wrapper.hpp"
 
 #include <iostream>
 #include <set>
+#include <unordered_set>
 #include <vector>
-
-#ifndef NDEBUG
-const bool ENABLE_DEBUGGING = true;
-#else
-const bool ENABLE_DEBUGGING = false;
-#endif
 
 const char *DEBUG_LAYER = "VK_LAYER_KHRONOS_validation";
 
@@ -57,6 +53,12 @@ vk::Instance::Instance() {
     appInfo.apiVersion = VK_API_VERSION_1_3;
 
     std::set<std::string> extStorage;
+    std::vector<std::string> dlssRequiredExtensions;
+    bool dlssRequirementQuerySuccess = false;
+#ifdef MCVR_ENABLE_XESS
+    std::vector<std::string> xessRequiredExtensions;
+    bool xessRequirementQuerySuccess = false;
+#endif
 
     // Get instance extensions required by GLFW to draw to window
     unsigned int glfwExtensionCount;
@@ -72,24 +74,54 @@ vk::Instance::Instance() {
         extStorage.insert(glfwExtensions[i]);
     }
 
-    // dlss extensions
+    // DLSS extensions
     std::vector<VkExtensionProperties> dlssExtensions;
-    NgxContext::getDlssRRRequiredInstanceExtensions(dlssExtensions);
+    NVSDK_NGX_Result dlssExtensionQueryResult = NgxContext::getDlssRRRequiredInstanceExtensions(dlssExtensions);
+    if (NVSDK_NGX_SUCCEED(dlssExtensionQueryResult)) {
+        dlssRequirementQuerySuccess = true;
 #ifdef DEBUG
-    instanceCout() << "dlss extensions:" << std::endl;
+        instanceCout() << "dlss extensions:" << std::endl;
 #endif
-    for (int i = 0; i < dlssExtensions.size(); i++) {
+        for (const auto &dlssExtension : dlssExtensions) {
 #ifdef DEBUG
-        instanceCout() << "\t" << dlssExtensions[i].extensionName << std::endl;
+            instanceCout() << "\t" << dlssExtension.extensionName << std::endl;
 #endif
-        extStorage.insert(dlssExtensions[i].extensionName);
+            extStorage.insert(dlssExtension.extensionName);
+            dlssRequiredExtensions.emplace_back(dlssExtension.extensionName);
+        }
+    } else {
+        instanceCerr() << "failed to query dlss instance extensions; skipping." << std::endl;
     }
+
+#ifdef MCVR_ENABLE_XESS
+    std::vector<const char *> xessExtensions;
+    uint32_t xessMinApiVersion = 0;
+    if (mcvr::XeSSWrapper::getRequiredInstanceExtensions(xessExtensions, &xessMinApiVersion)) {
+        xessRequirementQuerySuccess = true;
+#    ifdef DEBUG
+        instanceCout() << "xess extensions:" << std::endl;
+#    endif
+        for (const char *extension : xessExtensions) {
+#    ifdef DEBUG
+            instanceCout() << "\t" << extension << std::endl;
+#    endif
+            extStorage.insert(extension);
+            xessRequiredExtensions.emplace_back(extension);
+        }
+
+        if (xessMinApiVersion > appInfo.apiVersion) { appInfo.apiVersion = xessMinApiVersion; }
+    } else {
+        instanceCerr() << "xess instance extensions unavailable; skipping." << std::endl;
+    }
+#endif
 
     // dynamic vertex input state ext
     // repeated for dlss, but make sure
     extStorage.insert(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
-    // if (ENABLE_DEBUGGING) { push_ext(VK_EXT_DEBUG_REPORT_EXTENSION_NAME); }
+#ifdef DEBUG
+    extStorage.insert(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+#endif
 
     // Check for extensions
     uint32_t extensionCount = 0;
@@ -102,6 +134,11 @@ vk::Instance::Instance() {
 
     std::vector<VkExtensionProperties> availableExtensions(extensionCount);
     vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, availableExtensions.data());
+    std::unordered_set<std::string> availableExtensionSet;
+    availableExtensionSet.reserve(availableExtensions.size());
+    for (const auto &availableExtension : availableExtensions) {
+        availableExtensionSet.insert(availableExtension.extensionName);
+    }
 
 #ifdef DEBUG
     instanceCout() << "supported extensions:" << std::endl;
@@ -110,15 +147,40 @@ vk::Instance::Instance() {
     }
 #endif
 
+    auto areRequiredExtensionsSupported = [&](const std::vector<std::string> &requiredExtensions) {
+        for (const auto &requiredExtension : requiredExtensions) {
+            if (availableExtensionSet.find(requiredExtension) == availableExtensionSet.end()) { return false; }
+        }
+        return true;
+    };
+
+    dlssInstanceExtensionsCompatible_ =
+        dlssRequirementQuerySuccess && areRequiredExtensionsSupported(dlssRequiredExtensions);
+    if (!dlssInstanceExtensionsCompatible_) {
+        instanceCerr() << "dlss instance extension requirements are not fully satisfied." << std::endl;
+    }
+
+#ifdef MCVR_ENABLE_XESS
+    xessInstanceExtensionsCompatible_ =
+        xessRequirementQuerySuccess && areRequiredExtensionsSupported(xessRequiredExtensions);
+    if (!xessInstanceExtensionsCompatible_) {
+        instanceCerr() << "xess instance extension requirements are not fully satisfied." << std::endl;
+    }
+#endif
+
     std::vector<const char *> extensions;
-    for (const auto &extension : extStorage) { extensions.push_back(extension.c_str()); }
+    for (const auto &extension : extStorage) {
+        if (availableExtensionSet.find(extension) == availableExtensionSet.end()) {
+            instanceCerr() << "extension not supported, skipping: " << extension << std::endl;
+            continue;
+        }
+        extensions.push_back(extension.c_str());
+    }
 
 #ifdef DEBUG
     instanceCout() << "selected extensions:" << std::endl;
     for (const auto &extension : extensions) { instanceCout() << "\t" << extension << std::endl; }
 #endif
-
-    // TODO: chek selected extensions in available ones
 
     VkInstanceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -126,10 +188,22 @@ vk::Instance::Instance() {
     createInfo.enabledExtensionCount = (uint32_t)extensions.size();
     createInfo.ppEnabledExtensionNames = extensions.data();
 
-    if (ENABLE_DEBUGGING) {
-        createInfo.enabledLayerCount = 1;
-        createInfo.ppEnabledLayerNames = &DEBUG_LAYER;
-    }
+#ifdef DEBUG
+    createInfo.enabledLayerCount = 1;
+    createInfo.ppEnabledLayerNames = &DEBUG_LAYER;
+
+    // VkValidationFeatureEnableEXT enables[] = {
+    //     VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,
+    //     VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT,
+    // };
+
+    // VkValidationFeaturesEXT validationFeatures = {};
+    // validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+    // validationFeatures.enabledValidationFeatureCount = 2;
+    // validationFeatures.pEnabledValidationFeatures = enables;
+
+    // createInfo.pNext = &validationFeatures;
+#endif
 
     // Initialize Vulkan instance
     if (vkCreateInstance(&createInfo, nullptr, &instance_) != VK_SUCCESS) {
@@ -142,25 +216,10 @@ vk::Instance::Instance() {
     }
 
     volkLoadInstance(instance_);
-
-    // if (ENABLE_DEBUGGING) {
-    //     VkDebugReportCallbackCreateInfoEXT createInfo = {};
-    //     createInfo.pfnCallback = debugCallback;
-
-    //     if (vkCreateDebugReportCallbackEXT(instance_, &createInfo, nullptr, &callback_) != VK_SUCCESS) {
-    //         instanceCerr() << "failed to create debug callback" << std::endl;
-    //         exit(EXIT_FAILURE);
-    //     } else {
-    //         instanceCout() << "created debug callback" << std::endl;
-    //     }
-    // } else {
-    //     instanceCout() << "skipped creating debug callback" << std::endl;
-    // }
 }
 
 vk::Instance::~Instance() {
     vkDestroyInstance(instance_, nullptr);
-    // if (ENABLE_DEBUGGING) { vkDestroyDebugReportCallbackEXT(instance_, callback_, nullptr); }
 
 #ifdef DEBUG
     instanceCout() << "instance deconstructed" << std::endl;
@@ -169,4 +228,12 @@ vk::Instance::~Instance() {
 
 VkInstance &vk::Instance::vkInstance() {
     return instance_;
+}
+
+bool vk::Instance::isDlssInstanceExtensionsCompatible() const {
+    return dlssInstanceExtensionsCompatible_;
+}
+
+bool vk::Instance::isXessInstanceExtensionsCompatible() const {
+    return xessInstanceExtensionsCompatible_;
 }

@@ -83,7 +83,7 @@ class TemporalAccumulationModule : public WorldModule, public SharedObject<Tempo
     uint32_t width_, height_;
 
     float alpha_ = 0.12;
-    float threshould_ = 0.9;
+    float threshold_ = 0.9;
 };
 
 struct TemporalAccumulationModuleContext : public WorldModuleContext, SharedObject<TemporalAccumulationModuleContext> {
@@ -92,6 +92,7 @@ struct TemporalAccumulationModuleContext : public WorldModuleContext, SharedObje
     // input
     std::shared_ptr<vk::DeviceLocalImage> hdrNoisyImage;
     std::shared_ptr<vk::DeviceLocalImage> motionVectorImage;
+    std::shared_ptr<vk::DeviceLocalImage> normalRoughnessImage;
 
     // accumulation
     std::shared_ptr<vk::DescriptorTable> descriptorTable;

@@ -17,6 +17,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_rebuildSi
                                                                                      jlong index,
                                                                                      jint geometryCount,
                                                                                      jlong geometryTypes,
+                                                                                     jlong geometryGroupNames,
                                                                                      jlong geometryTextures,
                                                                                      jlong vertexFormats,
                                                                                      jlong vertexCounts,
@@ -31,10 +32,11 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_rebuildSi
         .id = index,
         .geometryCount = geometryCount,
         .geometryTypes = reinterpret_cast<int *>(geometryTypes),
+        .geometryGroupNames = reinterpret_cast<const char **>(geometryGroupNames),
         .geometryTextures = reinterpret_cast<int *>(geometryTextures),
         .vertexFormats = reinterpret_cast<int *>(vertexFormats),
         .vertexCounts = reinterpret_cast<int *>(vertexCounts),
-        .vertices = reinterpret_cast<vk::VertexFormat::PBRTriangle **>(vertexAddrs),
+        .vertices = reinterpret_cast<vk::VertexFormat::PBRVertex **>(vertexAddrs),
         .isImportant = static_cast<bool>(important),
     });
 }

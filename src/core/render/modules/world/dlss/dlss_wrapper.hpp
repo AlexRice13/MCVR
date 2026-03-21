@@ -84,7 +84,7 @@ class NgxContext : public SharedObject<NgxContext> {
 #ifdef NDEBUG
         NVSDK_NGX_Logging_Level loggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
 #else
-        NVSDK_NGX_Logging_Level loggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
+        NVSDK_NGX_Logging_Level loggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
 #endif
         std::string applicationPath; // directory to store temporary files and logs in
     };

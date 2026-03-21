@@ -91,20 +91,27 @@ static void bind_symbols(DYNLIB_HANDLE h) {
     p_glfwWaitEvents = reinterpret_cast<PFN_glfwWaitEvents>(gp("glfwWaitEvents"));
 }
 
+static std::u16string JStringToU16(JNIEnv* env, jstring jstr) {
+    if (!jstr) return {};
+    const jchar* chars = env->GetStringChars(jstr, nullptr);
+    jsize len = env->GetStringLength(jstr);
+    std::u16string u16(reinterpret_cast<const char16_t*>(chars),
+                       reinterpret_cast<const char16_t*>(chars) + len);
+    env->ReleaseStringChars(jstr, chars);
+    return u16;
+}
+
+static std::filesystem::path JStringToPath(JNIEnv* env, jstring jstr) {
+    std::u16string u16 = JStringToU16(env, jstr);
+    return std::filesystem::path(u16);
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initFolderPath(JNIEnv *env,
                                                                                           jclass,
                                                                                           jstring folderPath) {
     if (folderPath == NULL) { return; }
 
-    const char *nativeString = env->GetStringUTFChars(folderPath, nullptr);
-
-    if (nativeString == nullptr) { return; }
-
-    std::string pathStr(nativeString);
-
-    env->ReleaseStringUTFChars(folderPath, nativeString);
-
-    Renderer::folderPath = std::filesystem::path(pathStr);
+    Renderer::folderPath = JStringToU16(env, folderPath);
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initRenderer(JNIEnv *env,

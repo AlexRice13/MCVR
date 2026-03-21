@@ -3,9 +3,9 @@
 #include "common/shared.hpp"
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
+#include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
-#include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 
 #include <map>
 #include <mutex>
@@ -21,12 +21,13 @@ class GarbageCollector : public SharedObject<GarbageCollector> {
     template <typename T>
     void collect(std::shared_ptr<T> garbage);
 
-    void clear();
+    void clear(uint32_t index);
 
   private:
     std::weak_ptr<Framework> framework_;
     std::vector<std::vector<std::shared_ptr<void>>> collectors_;
     uint32_t index_ = 0;
+    std::recursive_mutex mtx_;
 };
 
 struct FrameworkContext : public SharedObject<FrameworkContext> {
@@ -141,6 +142,16 @@ class Framework : public SharedObject<Framework> {
 
 template <typename T>
 void GarbageCollector::collect(std::shared_ptr<T> garbage) {
-    auto framework = framework_.lock();
-    if (garbage != nullptr) { collectors_[index_].push_back(garbage); }
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
+    
+    if (garbage != nullptr) {
+        collectors_[index_].push_back(garbage);
+
+#ifdef DEBUG
+        if constexpr (std::is_same_v<T, vk::DeviceLocalImage>) {
+            std::cout << "Garbage collector enqueued image (" << garbage->debugName << ") in frame: " << index_
+                      << std::endl;
+        }
+#endif
+    }
 }

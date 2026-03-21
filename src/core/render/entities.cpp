@@ -2,6 +2,7 @@
 
 #include "core/render/buffers.hpp"
 #include "core/render/render_framework.hpp"
+#include "core/vulkan/vertex.hpp"
 #include "core/render/renderer.hpp"
 
 #include <algorithm>
@@ -32,26 +33,30 @@ EntityBuildData::EntityBuildData(int hashCode,
                                  double x,
                                  double y,
                                  double z,
-                                 int rtFlag,
+                                 int rayTracingFlag,
                                  int prebuiltBLAS,
                                  World::Coordinates coordinate,
                                  uint32_t geometryCount,
                                  std::vector<World::GeometryTypes> &&geometryTypes,
-                                 std::vector<std::vector<vk::VertexFormat::PBRTriangle>> &&vertices,
+                                 std::vector<std::string> &&geometryGroupNames,
+                                 std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                                  std::vector<std::vector<uint32_t>> &&indices)
     : hashCode(hashCode),
       x(x),
       y(y),
       z(z),
-      rtFlag(rtFlag),
+      rayTracingFlag(rayTracingFlag),
       prebuiltBLAS(prebuiltBLAS),
       coordinate(coordinate),
       geometryCount(geometryCount),
       geometryTypes(std::move(geometryTypes)),
+      geometryGroupNames(std::move(geometryGroupNames)),
       vertices(std::move(vertices)),
       indices(std::move(indices)),
       vertexBufferAddresses(),
-      indexBufferAddresses() {}
+      indexBufferAddresses(),
+      positionBufferAddresses(),
+      materialBufferAddresses() {}
 
 void EntityBuildDataBatch::addData(std::shared_ptr<EntityBuildData> data) {
     datas.push_back(data);
@@ -84,21 +89,39 @@ void EntityBuildDataBatch::build() {
     }
 
     vertexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalVertexCount * sizeof(vk::VertexFormat::PBRTriangle),
+        vma, device, totalVertexCount * sizeof(vk::VertexFormat::PBRVertex),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    positionBuffer = vk::DeviceLocalBuffer::create(
+        vma, device, totalVertexCount * sizeof(vk::VertexFormat::PositionVertex),
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    materialBuffer = vk::DeviceLocalBuffer::create(
+        vma, device, totalVertexCount * sizeof(vk::VertexFormat::MaterialVertex),
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     indexBuffer = vk::DeviceLocalBuffer::create(
         vma, device, totalIndexCount * sizeof(uint32_t),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    vk::VertexFormat::PBRTriangle *vertexPtr = static_cast<vk::VertexFormat::PBRTriangle *>(vertexBuffer->mappedPtr());
+    vk::VertexFormat::PBRVertex *vertexPtr = static_cast<vk::VertexFormat::PBRVertex *>(vertexBuffer->mappedPtr());
+    auto *positionPtr = static_cast<vk::VertexFormat::PositionVertex *>(positionBuffer->mappedPtr());
+    auto *materialPtr = static_cast<vk::VertexFormat::MaterialVertex *>(materialBuffer->mappedPtr());
     uint32_t *indexPtr = static_cast<uint32_t *>(indexBuffer->mappedPtr());
     for (auto data : datas) {
         for (int i = 0; i < data->geometryCount; i++) {
             std::memcpy(vertexPtr, data->vertices[i].data(),
-                        data->vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle));
+                        data->vertices[i].size() * sizeof(vk::VertexFormat::PBRVertex));
             vertexPtr += data->vertices[i].size();
+
+            auto positionVertices = vk::Vertex::buildPositionVertices(data->vertices[i]);
+            std::memcpy(positionPtr, positionVertices.data(),
+                        positionVertices.size() * sizeof(vk::VertexFormat::PositionVertex));
+            positionPtr += positionVertices.size();
+
+            auto materialVertices = vk::Vertex::buildMaterialVertices(data->vertices[i]);
+            std::memcpy(materialPtr, materialVertices.data(),
+                        materialVertices.size() * sizeof(vk::VertexFormat::MaterialVertex));
+            materialPtr += materialVertices.size();
 
             std::memcpy(indexPtr, data->indices[i].data(), data->indices[i].size() * sizeof(uint32_t));
             indexPtr += data->indices[i].size();
@@ -107,6 +130,8 @@ void EntityBuildDataBatch::build() {
         totalGeometryCount += data->geometryCount;
     }
     vertexBuffer->flushStagingBuffer();
+    positionBuffer->flushStagingBuffer();
+    materialBuffer->flushStagingBuffer();
     indexBuffer->flushStagingBuffer();
 
     blasBatchBuilder = vk::BLASBatchBuilder::create();
@@ -123,13 +148,21 @@ void EntityBuildDataBatch::build() {
         for (int i = 0; i < data->geometryCount; i++) {
             VkDeviceAddress vertexBufferAddress =
                 vertexBuffer->bufferAddress() +
-                geometryVertexOffsets[instanceOffset + i] * sizeof(vk::VertexFormat::PBRTriangle);
+                geometryVertexOffsets[instanceOffset + i] * sizeof(vk::VertexFormat::PBRVertex);
             VkDeviceAddress indexBufferAddress =
                 indexBuffer->bufferAddress() + geometryIndexOffsets[instanceOffset + i] * sizeof(uint32_t);
+            VkDeviceAddress positionBufferAddress =
+                positionBuffer->bufferAddress() +
+                geometryVertexOffsets[instanceOffset + i] * sizeof(vk::VertexFormat::PositionVertex);
+            VkDeviceAddress materialBufferAddress =
+                materialBuffer->bufferAddress() +
+                geometryVertexOffsets[instanceOffset + i] * sizeof(vk::VertexFormat::MaterialVertex);
             data->vertexBufferAddresses.push_back(vertexBufferAddress);
             data->indexBufferAddresses.push_back(indexBufferAddress);
+            data->positionBufferAddresses.push_back(positionBufferAddress);
+            data->materialBufferAddresses.push_back(materialBufferAddress);
             if (data->prebuiltBLAS < 0) {
-                blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
+                blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRVertex>(
                     vertexBufferAddress, data->vertices[i].size(), indexBufferAddress, data->indices[i].size(),
                     data->geometryTypes[i] == World::WORLD_SOLID);
             }
@@ -156,7 +189,7 @@ Entity::Entity(std::shared_ptr<EntityBuildData> chunkBuildData) {
     x = chunkBuildData->x;
     y = chunkBuildData->y;
     z = chunkBuildData->z;
-    rtFlag = chunkBuildData->rtFlag;
+    rayTracingFlag = chunkBuildData->rayTracingFlag;
     prebuiltBLAS = chunkBuildData->prebuiltBLAS;
     coordinate = chunkBuildData->coordinate;
 
@@ -165,11 +198,16 @@ Entity::Entity(std::shared_ptr<EntityBuildData> chunkBuildData) {
         std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->vertexBufferAddresses));
     indexBufferAddresses =
         std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->indexBufferAddresses));
+    positionBufferAddresses =
+        std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->positionBufferAddresses));
+    materialBufferAddresses =
+        std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->materialBufferAddresses));
 
     geometryCount = chunkBuildData->geometryCount;
     geometryTypes = std::make_shared<std::vector<World::GeometryTypes>>(std::move(chunkBuildData->geometryTypes));
+    geometryGroupNames = std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryGroupNames));
     vertices =
-        std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>>(std::move(chunkBuildData->vertices));
+        std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRVertex>>>(std::move(chunkBuildData->vertices));
     indices = std::make_shared<std::vector<std::vector<uint32_t>>>(std::move(chunkBuildData->indices));
 }
 
@@ -178,11 +216,15 @@ EntityBatch::EntityBatch(std::shared_ptr<EntityBuildDataBatch> entityBuildDataBa
         auto entity = Entity::create(data);
         entity->vertexBuffer = entityBuildDataBatch->vertexBuffer;
         entity->indexBuffer = entityBuildDataBatch->indexBuffer;
+        entity->positionBuffer = entityBuildDataBatch->positionBuffer;
+        entity->materialBuffer = entityBuildDataBatch->materialBuffer;
         entities.push_back(entity);
     }
 
     vertexBuffer = entityBuildDataBatch->vertexBuffer;
     indexBuffer = entityBuildDataBatch->indexBuffer;
+    positionBuffer = entityBuildDataBatch->positionBuffer;
+    materialBuffer = entityBuildDataBatch->materialBuffer;
 }
 
 EntityPost::EntityPost(std::shared_ptr<EntityBuildData> chunkBuildData) {
@@ -201,7 +243,7 @@ EntityPost::EntityPost(std::shared_ptr<EntityBuildData> chunkBuildData) {
 
     for (int i = 0; i < geometryCount; i++) {
         auto vertexBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         auto indexBuffer = vk::DeviceLocalBuffer::create(vma, device, indices[i].size() * sizeof(uint32_t),
                                                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
@@ -257,13 +299,14 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
         uint32_t allVertexCount = 0, allIndexCount = 0;
         std::vector<World::GeometryTypes> geometryTypes;
-        std::vector<std::vector<vk::VertexFormat::PBRTriangle>> vertices;
+        std::vector<std::string> geometryGroupNames;
+        std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
         std::vector<std::vector<uint32_t>> indices;
         int hashCode = task.entityHashCodes[e];
         double x = task.entityXs[e];
         double y = task.entityYs[e];
         double z = task.entityZs[e];
-        int rtFlag = task.entityRTFlags[e];
+        int rayTracingFlag = task.entityRTFlags[e];
         int prebuiltBLAS = task.entityPrebuiltBLASs[e];
         World::Coordinates coordinate = task.coordinate;
         bool post = task.entityPosts[e];
@@ -274,6 +317,11 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                 static_cast<World::GeometryTypes>(task.geometryTypes[geometryIndex + i]);
             int geometryTexture = task.geometryTextures[geometryIndex + i];
             geometryTypes.push_back(geometryType);
+            if (task.geometryGroupNames != nullptr && task.geometryGroupNames[geometryIndex + i] != nullptr) {
+                geometryGroupNames.emplace_back(task.geometryGroupNames[geometryIndex + i]);
+            } else {
+                geometryGroupNames.emplace_back("Entity");
+            }
 
             auto &geometryVertices = vertices.emplace_back();
             auto &geometryIndices = indices.emplace_back();
@@ -281,10 +329,10 @@ void Entities::queueBuild(EntitiesBuildTask task) {
             if (task.vertexFormats[geometryIndex + i] == World::PBR_TRIANGLE) {
                 geometryVertices.resize(task.vertexCounts[geometryIndex + i]);
                 std::memcpy(geometryVertices.data(), task.vertices[geometryIndex + i],
-                            task.vertexCounts[geometryIndex + i] * sizeof(vk::VertexFormat::PBRTriangle));
+                            task.vertexCounts[geometryIndex + i] * sizeof(vk::VertexFormat::PBRVertex));
             } else {
                 for (int j = 0; j < task.vertexCounts[geometryIndex + i]; j++) {
-                    vk::VertexFormat::PBRTriangle vertex{};
+                    vk::VertexFormat::PBRVertex vertex{};
 
                     switch (task.vertexFormats[geometryIndex + i]) {
                         case World::POSITION_COLOR_TEXTURE_LIGHT_NORMAL: {
@@ -668,7 +716,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                     break;
                 }
                 case World::DrawMode::TRIANGLE_STRIP: {
-                    std::vector<vk::VertexFormat::PBRTriangle> fixedVertices;
+                    std::vector<vk::VertexFormat::PBRVertex> fixedVertices;
                     for (int j = 2; j < task.vertexCounts[geometryIndex + i]; j += 2) {
                         auto v0 = geometryVertices[j - 2];
                         auto v1 = geometryVertices[j - 1];
@@ -706,7 +754,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                     break;
                 }
                 case World::DrawMode::LINE_STRIP: {
-                    std::vector<vk::VertexFormat::PBRTriangle> fixedVertices;
+                    std::vector<vk::VertexFormat::PBRVertex> fixedVertices;
                     for (int j = 1; j < task.vertexCounts[geometryIndex + i]; j++) {
                         fixedVertices.push_back(geometryVertices[j - 1]);
                         fixedVertices.push_back(geometryVertices[j]);
@@ -762,7 +810,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                     break;
                 }
                 case World::DrawMode::LINES: {
-                    std::vector<vk::VertexFormat::PBRTriangle> fixedVertices;
+                    std::vector<vk::VertexFormat::PBRVertex> fixedVertices;
                     for (int j = 0; j + 3 < task.vertexCounts[geometryIndex + i]; j += 4) {
                         fixedVertices.push_back(geometryVertices[j]);
                         fixedVertices.push_back(geometryVertices[j + 1]);
@@ -830,6 +878,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                 vertices.pop_back();
                 indices.pop_back();
                 geometryTypes.pop_back();
+                geometryGroupNames.pop_back();
             } else {
                 allVertexCount += geometryVertices.size();
                 allIndexCount += geometryIndices.size();
@@ -840,8 +889,9 @@ void Entities::queueBuild(EntitiesBuildTask task) {
         if (geometryCountWithoutGlint == 0) { continue; }
 
         std::shared_ptr<EntityBuildData> chunkBuildData =
-            EntityBuildData::create(hashCode, x, y, z, rtFlag, prebuiltBLAS, coordinate, geometryCountWithoutGlint,
-                                    std::move(geometryTypes), std::move(vertices), std::move(indices));
+            EntityBuildData::create(hashCode, x, y, z, rayTracingFlag, prebuiltBLAS, coordinate, geometryCountWithoutGlint,
+                                    std::move(geometryTypes), std::move(geometryGroupNames), std::move(vertices),
+                                    std::move(indices));
 
         if (post) {
             entityPostBuildDataBatch_->addData(chunkBuildData);
@@ -866,6 +916,8 @@ void Entities::build() {
 
     Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->vertexBuffer,
                                                               entityBuildDataBatch_->indexBuffer);
+    Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->positionBuffer);
+    Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->materialBuffer);
     blasBatchBuilder_ = entityBuildDataBatch_->blasBatchBuilder;
 
     entityBatch_ = EntityBatch::create(entityBuildDataBatch_);
@@ -877,6 +929,14 @@ void Entities::build() {
                                                                       entity->indexBuffers[i]);
         }
     }
+}
+
+void Entities::close() {
+    entityBatch_ = nullptr;
+    entityPostBatch_ = nullptr;
+    entityBuildDataBatch_ = nullptr;
+    entityPostBuildDataBatch_ = nullptr;
+    blasBatchBuilder_ = nullptr;
 }
 
 std::shared_ptr<EntityBatch> Entities::entityBatch() {
