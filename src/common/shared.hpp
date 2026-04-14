@@ -223,10 +223,6 @@ namespace Data {
 
         T_VEC3 light1Direction;
         T_UINT hdrOutputEnabled;
-
-        T_UINT pad1;
-        T_UINT pad2;
-        T_UINT pad3;
     };
 
     struct OverlayPostUBO {
