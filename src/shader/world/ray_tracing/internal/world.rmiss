@@ -100,7 +100,7 @@ vec4 evalSunBillboard(vec3 rd) {
     vec2 p = vec2(dot(rd, right), dot(rd, up));
     vec2 q = p / max(z, 1e-4);
 
-    float tanHalf = tan(0.03); // tan(x), x: half angle from middle to edge
+    float tanHalf = tan(skyUBO.sunAngularRadius); // sun half-angle from UBO
 
     vec2 a = abs(q);
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
@@ -122,7 +122,7 @@ vec4 evalMoonBillboard(vec3 rd) {
     vec2 p = vec2(dot(rd, right), dot(rd, up));
     vec2 q = p / max(z, 1e-4);
 
-    float tanHalf = tan(0.05); // tan(x), x: half angle from middle to edge
+    float tanHalf = tan(skyUBO.sunAngularRadius * 1.667); // moon proportionally larger
 
     vec2 a = abs(q);
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);

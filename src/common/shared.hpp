@@ -310,6 +310,11 @@ namespace Data {
 
         T_VEC3 moonRadiance;
         T_UINT moonTextureID;
+
+        T_FLOAT sunAngularRadius;  // half-angle in radians for sun disc and shadow cone
+        T_FLOAT pad3;
+        T_FLOAT pad4;
+        T_FLOAT pad5;
     };
 
     struct TextureMapEntry {

@@ -249,7 +249,7 @@ void main() {
     if (worldUbo.skyType == 1) {
         vec3 lightDir = normalize(skyUBO.sunDirection);
         if (lightDir.y < 0.0) { lightDir = -lightDir; }
-        vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, 3000.0);
+        vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, 1.0 / max(skyUBO.sunAngularRadius * skyUBO.sunAngularRadius, 1e-6));
         float sampledLightNoL = dot(sampledLightDir, geoNormal);
         if (!isOpaqueSurface || sampledLightNoL > 0.0) {
             float lightPdf;
