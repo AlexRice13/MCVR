@@ -291,6 +291,8 @@ void RayTracingModule::preClose() {
     contexts_.clear();
     worldPrepare_ = nullptr;
     atmosphere_ = nullptr;
+    noiseTexture3D_ = nullptr;
+    noiseTexture3DSampler_ = nullptr;
 }
 
 uint32_t RayTracingModule::hitGroupIndexForName(const std::string &groupName) const {
@@ -341,6 +343,12 @@ void RayTracingModule::initDescriptorTables() {
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 3, // 3D noise texture for volumetric clouds
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -708,11 +716,132 @@ void RayTracingModule::initImages() {
 
     uint32_t size = framework->swapchain()->imageCount();
 
+    // Create 3D noise texture for volumetric clouds (128^3 R8_UNORM)
+    {
+        constexpr uint32_t noiseRes = 128;
+        constexpr uint32_t noiseSize = noiseRes * noiseRes * noiseRes;
+        std::vector<uint8_t> noiseData(noiseSize);
+
+        // Generate tileable value noise using a simple hash
+        auto hash = [](int x, int y, int z) -> uint8_t {
+            // Deterministic hash that tiles at 128
+            int n = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
+            n = (n << 13) ^ n;
+            n = n * (n * n * 15731 + 789221) + 1376312589;
+            return static_cast<uint8_t>((n & 0x7fffffff) >> 23); // 0-255
+        };
+
+        for (uint32_t z = 0; z < noiseRes; z++) {
+            for (uint32_t y = 0; y < noiseRes; y++) {
+                for (uint32_t x = 0; x < noiseRes; x++) {
+                    // Trilinear interpolation of hash values for smooth value noise
+                    int ix = static_cast<int>(x) >> 3; // cell size = 8
+                    int iy = static_cast<int>(y) >> 3;
+                    int iz = static_cast<int>(z) >> 3;
+                    float fx = (static_cast<float>(x & 7)) / 8.0f;
+                    float fy = (static_cast<float>(y & 7)) / 8.0f;
+                    float fz = (static_cast<float>(z & 7)) / 8.0f;
+                    // Smoothstep
+                    fx = fx * fx * (3.0f - 2.0f * fx);
+                    fy = fy * fy * (3.0f - 2.0f * fy);
+                    fz = fz * fz * (3.0f - 2.0f * fz);
+
+                    int ix1 = (ix + 1) & 15; // tile at 16 cells (128/8)
+                    int iy1 = (iy + 1) & 15;
+                    int iz1 = (iz + 1) & 15;
+
+                    float c000 = hash(ix, iy, iz) / 255.0f;
+                    float c100 = hash(ix1, iy, iz) / 255.0f;
+                    float c010 = hash(ix, iy1, iz) / 255.0f;
+                    float c110 = hash(ix1, iy1, iz) / 255.0f;
+                    float c001 = hash(ix, iy, iz1) / 255.0f;
+                    float c101 = hash(ix1, iy, iz1) / 255.0f;
+                    float c011 = hash(ix, iy1, iz1) / 255.0f;
+                    float c111 = hash(ix1, iy1, iz1) / 255.0f;
+
+                    float c00 = c000 + (c100 - c000) * fx;
+                    float c10 = c010 + (c110 - c010) * fx;
+                    float c01 = c001 + (c101 - c001) * fx;
+                    float c11 = c011 + (c111 - c011) * fx;
+
+                    float c0 = c00 + (c10 - c00) * fy;
+                    float c1 = c01 + (c11 - c01) * fy;
+
+                    float val = c0 + (c1 - c0) * fz;
+                    noiseData[z * noiseRes * noiseRes + y * noiseRes + x] =
+                        static_cast<uint8_t>(val * 255.0f);
+                }
+            }
+        }
+
+        auto device = framework->device();
+        auto vma = framework->vma();
+
+        noiseTexture3D_ = vk::DeviceLocalImage::create(
+            device, vma, true, 1, noiseRes, noiseRes, noiseRes, 1,
+            VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT,
+            0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0
+#ifdef DEBUG
+            , "3D Noise Texture"
+#endif
+        );
+
+        noiseTexture3D_->uploadToStagingBuffer(noiseData.data());
+
+        noiseTexture3DSampler_ = vk::Sampler::create(
+            device, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            VK_SAMPLER_ADDRESS_MODE_REPEAT);
+
+        // One-shot upload to GPU
+        auto uploadCommandPool = vk::CommandPool::create(framework->physicalDevice(), device);
+        auto uploadCmdBuffer = vk::CommandBuffer::create(device, uploadCommandPool);
+        uploadCmdBuffer->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+        auto physicalDevice = framework->physicalDevice();
+        auto mainQueueIndex = physicalDevice->mainQueueIndex();
+
+        uploadCmdBuffer->barriersBufferImage({}, {{
+            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+            .srcAccessMask = 0,
+            .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = noiseTexture3D_,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        }});
+        noiseTexture3D_->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        noiseTexture3D_->uploadToImage(uploadCmdBuffer);
+
+        uploadCmdBuffer->barriersBufferImage({}, {{
+            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = noiseTexture3D_,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        }});
+        noiseTexture3D_->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        uploadCmdBuffer->end();
+        uploadCmdBuffer->submitMainQueueIndividual(device);
+        vkQueueWaitIdle(device->mainVkQueue());
+    }
+
     for (int i = 0; i < size; i++) {
         rayTracingDescriptorTables_[i]->bindSamplerImageForShader(atmosphere_->atmLUTImageSampler_,
                                                                   atmosphere_->atmLUTImage_, 0, 1);
         rayTracingDescriptorTables_[i]->bindSamplerImageForShader(atmosphere_->atmCubeMapImageSamplers_[i],
                                                                   atmosphere_->atmCubeMapImages_[i], 0, 2, 7);
+        rayTracingDescriptorTables_[i]->bindSamplerImageForShader(noiseTexture3DSampler_,
+                                                                  noiseTexture3D_, 0, 3);
 
         rayTracingDescriptorTables_[i]->bindImage(hdrNoisyOutputImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 0);
         rayTracingDescriptorTables_[i]->bindImage(diffuseAlbedoImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 1);

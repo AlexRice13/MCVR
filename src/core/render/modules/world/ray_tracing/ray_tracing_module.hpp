@@ -216,6 +216,10 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<Atmosphere> atmosphere_;
     std::shared_ptr<WorldPrepare> worldPrepare_;
 
+    // 3D noise texture for volumetric clouds
+    std::shared_ptr<vk::DeviceLocalImage> noiseTexture3D_;
+    std::shared_ptr<vk::Sampler> noiseTexture3DSampler_;
+
     std::vector<std::shared_ptr<WorldModuleContext>> contexts_;
 };
 

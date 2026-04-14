@@ -288,9 +288,9 @@ namespace Data {
         T_UINT moonPhase;
 
         T_FLOAT rainGradient;
-        T_FLOAT pad0;
-        T_FLOAT pad1;
-        T_FLOAT pad2;
+        T_FLOAT cloudDensityGradient;  // 0..1: vertical density profile strength
+        T_FLOAT cloudOpacity;          // 0..1: base cloud density multiplier
+        T_FLOAT cloudAnisotropy;       // 0..1: HG phase function anisotropy
 
         // AtmosphereParams
 

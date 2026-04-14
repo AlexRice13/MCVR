@@ -165,6 +165,25 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
                      std::string debugName = ""
 #endif
     );
+    // 3D image constructor (depth > 1 creates VK_IMAGE_TYPE_3D)
+    DeviceLocalImage(std::shared_ptr<Device> device,
+                     std::shared_ptr<VMA> vma,
+                     bool persistStaging,
+                     uint32_t mipLevels,
+                     uint32_t width,
+                     uint32_t height,
+                     uint32_t depth,
+                     uint32_t layer,
+                     VkFormat format,
+                     VkImageUsageFlags usage,
+                     VmaAllocationCreateFlags allocationFlag,
+                     VmaMemoryUsage vmaUsage,
+                     VkImageCreateFlags imageCreateFlags
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
     ~DeviceLocalImage();
 
     // void downloadFromStagingBuffer(size_t size = -1, size_t offset = -1);
@@ -181,6 +200,7 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
 
     uint32_t width() override;
     uint32_t height() override;
+    uint32_t depth();
     uint32_t layer() override;
     VkFormat &vkFormat() override;
     VkBuffer &vkStagingBuffer();
@@ -197,6 +217,7 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
 
     uint32_t width_;
     uint32_t height_;
+    uint32_t depth_ = 1;
     uint32_t layer_;
     VkFormat format_;
     bool persistStaging_;
