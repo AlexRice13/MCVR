@@ -239,7 +239,7 @@ void Buffers::appendOverlayDrawUniform(vk::Data::OverlayUBO &ubo) {
     mapGLToVulkan[3][2] = 0.5f;
 
     ubo.projectionMat = mapGLToVulkan * ubo.projectionMat;
-    ubo.hdrOutputEnabled = Renderer::options.hdrActive ? 1u : 0u;
+    ubo.sdrBrightnessNits = Renderer::options.hdrActive ? Renderer::options.sdrBrightness : 0.0f;
 
     overlayDrawUniformQueue_->push_back(ubo);
 }

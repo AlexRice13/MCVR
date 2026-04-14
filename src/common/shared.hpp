@@ -222,7 +222,7 @@ namespace Data {
         T_FLOAT pad0;
 
         T_VEC3 light1Direction;
-        T_UINT hdrOutputEnabled;
+        T_FLOAT sdrBrightnessNits;
     };
 
     struct OverlayPostUBO {
@@ -364,8 +364,9 @@ namespace Data {
     }
 
     vec4 radianceConvertOverlaySdrToHdr(vec4 color, OverlayUBO ubo) {
-        if (ubo.hdrOutputEnabled == 0u) { return color; }
-        return vec4(radianceSrgbToLinear(max(color.rgb, vec3(0.0))), color.a);
+        if (ubo.sdrBrightnessNits <= 0.0) { return color; }
+        float multiplier = ubo.sdrBrightnessNits / 80.0;
+        return vec4(radianceSrgbToLinear(max(color.rgb, vec3(0.0))) * multiplier, color.a);
     }
 #endif
 #ifdef __cplusplus

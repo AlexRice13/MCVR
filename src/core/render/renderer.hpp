@@ -20,6 +20,7 @@ struct Options {
     float hdrMinLuminance = 0.0f;
     float hdrMaxLuminance = 1000.0f;
     float hdrGamma = 1.0f;
+    float sdrBrightness = 200.0f;
     uint32_t dlssMode = 1;
     uint32_t upscalerType = 1;
     uint32_t upscalerQuality = 0;

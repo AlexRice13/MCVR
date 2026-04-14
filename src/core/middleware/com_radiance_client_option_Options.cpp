@@ -65,6 +65,13 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrGamma
     Renderer::options.hdrGamma = std::max(static_cast<float>(hdrGamma), 1e-3f);
 }
 
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSdrBrightness(JNIEnv *,
+                                                                                       jclass,
+                                                                                       jfloat sdrBrightness,
+                                                                                       jboolean write) {
+    Renderer::options.sdrBrightness = std::max(static_cast<float>(sdrBrightness), 1.0f);
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBuildingBatchSize(
     JNIEnv *, jclass, jint chunkBuildingBatchSize, jboolean write) {
     Renderer::options.chunkBuildingBatchSize = chunkBuildingBatchSize;
