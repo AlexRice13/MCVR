@@ -8,6 +8,8 @@
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
 
+#include <algorithm>
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxFps(JNIEnv *,
                                                                                jclass,
                                                                                jint maxFps,
@@ -23,11 +25,44 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetInactivi
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetVsync(JNIEnv *,
-                                                                              jclass,
-                                                                              jboolean vsync,
-                                                                              jboolean write) {
+                                                                               jclass,
+                                                                               jboolean vsync,
+                                                                               jboolean write) {
     Renderer::options.vsync = vsync;
     if (write) Renderer::options.needRecreate = true;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrEnabled(JNIEnv *,
+                                                                                   jclass,
+                                                                                   jboolean hdrEnabled,
+                                                                                   jboolean write) {
+    Renderer::options.hdrEnabled = hdrEnabled;
+    if (!hdrEnabled) Renderer::options.hdrActive = false;
+    if (write) Renderer::options.needRecreate = true;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrMinLuminance(JNIEnv *,
+                                                                                        jclass,
+                                                                                        jfloat hdrMinLuminance,
+                                                                                        jboolean write) {
+    Renderer::options.hdrMinLuminance = std::max(static_cast<float>(hdrMinLuminance), 0.0f);
+    Renderer::options.hdrMaxLuminance =
+        std::max(Renderer::options.hdrMaxLuminance, Renderer::options.hdrMinLuminance + 1e-3f);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrMaxLuminance(JNIEnv *,
+                                                                                        jclass,
+                                                                                        jfloat hdrMaxLuminance,
+                                                                                        jboolean write) {
+    Renderer::options.hdrMaxLuminance =
+        std::max(static_cast<float>(hdrMaxLuminance), Renderer::options.hdrMinLuminance + 1e-3f);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrGamma(JNIEnv *,
+                                                                                 jclass,
+                                                                                 jfloat hdrGamma,
+                                                                                 jboolean write) {
+    Renderer::options.hdrGamma = std::max(static_cast<float>(hdrGamma), 1e-3f);
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBuildingBatchSize(

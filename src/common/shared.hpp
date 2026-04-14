@@ -222,7 +222,11 @@ namespace Data {
         T_FLOAT pad0;
 
         T_VEC3 light1Direction;
-        T_FLOAT pad1;
+        T_UINT hdrOutputEnabled;
+
+        T_UINT pad1;
+        T_UINT pad2;
+        T_UINT pad3;
     };
 
     struct OverlayPostUBO {
@@ -355,6 +359,19 @@ namespace Data {
         T_FLOAT brightnessFactor;
         T_FLOAT pad0;
     };
+#ifndef __cplusplus
+    vec3 radianceSrgbToLinear(vec3 color) {
+        bvec3 useLinearSegment = lessThanEqual(color, vec3(0.04045));
+        vec3 linearSegment = color / 12.92;
+        vec3 exponentialSegment = pow((color + 0.055) / 1.055, vec3(2.4));
+        return mix(exponentialSegment, linearSegment, useLinearSegment);
+    }
+
+    vec4 radianceConvertOverlaySdrToHdr(vec4 color, OverlayUBO ubo) {
+        if (ubo.hdrOutputEnabled == 0u) { return color; }
+        return vec4(radianceSrgbToLinear(max(color.rgb, vec3(0.0))), color.a);
+    }
+#endif
 #ifdef __cplusplus
 }; // namespace Data
 #endif

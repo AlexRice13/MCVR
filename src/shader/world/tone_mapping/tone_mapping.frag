@@ -35,9 +35,12 @@ layout(push_constant) uniform PushConstant {
     int clampOutput;
     int exposureMeteringMode;
     float centerMeteringPercent;
+    int hdrActive;
+    float hdrMinLuminance;
+    float hdrMaxLuminance;
+    float hdrGamma;
     float padding0;
     float padding1;
-    float padding2;
 }
 pc;
 
@@ -124,7 +127,13 @@ vec3 applySaturation(vec3 color, float saturation) {
     return mix(vec3(luma), color, saturation);
 }
 
+vec3 applyCalibrationGamma(vec3 color, float gammaValue) {
+    return pow(max(color, vec3(0.0)), vec3(1.0 / max(gammaValue, 1e-6)));
+}
+
 void main() {
+    const float SDR_REFERENCE_WHITE_NITS = 80.0;
+
     vec3 hdr = texture(HDR, texCoord).rgb;
 
     float exposure = (pc.autoExposure != 0) ? expData.exposure : pc.manualExposure;
@@ -135,7 +144,22 @@ void main() {
     vec3 mapped = applyToneMapping(expColor);
     mapped = max(mapped, vec3(0.0));
     mapped = applySaturation(mapped, max(pc.saturation, 0.0));
+
+    if (pc.hdrActive != 0) {
+        mapped = clamp(mapped, vec3(0.0), vec3(1.0));
+        mapped = applyCalibrationGamma(mapped, pc.hdrGamma);
+
+        float maxOutput = max(pc.hdrMaxLuminance, pc.hdrMinLuminance + 1e-3) / SDR_REFERENCE_WHITE_NITS;
+        vec3 minOutput = vec3(max(pc.hdrMinLuminance, 0.0) / SDR_REFERENCE_WHITE_NITS);
+        vec3 hdrOutput = mix(minOutput, vec3(maxOutput), mapped);
+
+        if (pc.clampOutput != 0) hdrOutput = clamp(hdrOutput, vec3(0.0), vec3(maxOutput));
+        fragColor = vec4(hdrOutput, 1.0);
+        return;
+    }
+
     mapped = pow(mapped, vec3(1.0 / 2.2));
+    mapped = applyCalibrationGamma(mapped, pc.hdrGamma);
     if (pc.clampOutput != 0) mapped = clamp(mapped, vec3(0.0), vec3(1.0));
 
     fragColor = vec4(mapped, 1.0);

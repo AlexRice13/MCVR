@@ -61,5 +61,5 @@ void main() {
             textureProj(textures[nonuniformEXT(ubo.texIndices[1])], texProj * end_portal_layer(ubo, float(i + 1))).rgb *
             COLORS[i];
     }
-    fragColor = vec4(color, 1.0);
+    fragColor = radianceConvertOverlaySdrToHdr(vec4(color, 1.0), ubo);
 }

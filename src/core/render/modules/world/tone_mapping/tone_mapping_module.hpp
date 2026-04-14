@@ -58,9 +58,12 @@ struct ToneMappingModulePushConstant {
     int clampOutput;
     int exposureMeteringMode;
     float centerMeteringPercent;
+    int hdrActive;
+    float hdrMinLuminance;
+    float hdrMaxLuminance;
+    float hdrGamma;
     float padding0;
     float padding1;
-    float padding2;
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

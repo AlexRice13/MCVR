@@ -17,5 +17,5 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     OverlayUBO ubo = ubos[drawId];
 
-    fragColor = ubo.colorModulator;
+    fragColor = radianceConvertOverlaySdrToHdr(ubo.colorModulator, ubo);
 }

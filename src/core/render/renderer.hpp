@@ -15,6 +15,11 @@ struct Options {
     uint32_t maxFps = 1e6;
     uint32_t inactivityFpsLimit = 1e6;
     bool vsync = true;
+    bool hdrEnabled = false;
+    bool hdrActive = false;
+    float hdrMinLuminance = 0.0f;
+    float hdrMaxLuminance = 1000.0f;
+    float hdrGamma = 1.0f;
     uint32_t dlssMode = 1;
     uint32_t upscalerType = 1;
     uint32_t upscalerQuality = 0;

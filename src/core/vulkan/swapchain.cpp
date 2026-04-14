@@ -11,6 +11,8 @@
 #include <iostream>
 #include <vector>
 
+#include "core/render/renderer.hpp"
+
 std::ostream &swapchainCout() {
     return std::cout << "[Swapchain] ";
 }
@@ -26,7 +28,7 @@ vk::Swapchain::Swapchain(std::shared_ptr<PhysicalDevice> physicalDevice,
     reconstruct();
 }
 
-VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
+VkSurfaceFormatKHR chooseSdrSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
     // can choose any format
     if (availableFormats.size() == 1 && availableFormats[0].format == VK_FORMAT_UNDEFINED) {
 #ifdef DEBUG
@@ -60,6 +62,30 @@ VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &av
               << std::endl;
 #endif
     return *selectedFormat;
+}
+
+VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats, bool wantHdr, bool &hdrActive) {
+    hdrActive = false;
+
+    if (wantHdr) {
+        auto hdrFormat =
+            std::find_if(availableFormats.begin(), availableFormats.end(), [](const VkSurfaceFormatKHR &candidate) {
+                return candidate.format == VK_FORMAT_R16G16B16A16_SFLOAT &&
+                       candidate.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+            });
+
+        if (hdrFormat != availableFormats.end()) {
+            hdrActive = true;
+            swapchainCout() << "selected native HDR surface format: " << hdrFormat->format
+                            << " color space: " << hdrFormat->colorSpace << std::endl;
+            return *hdrFormat;
+        }
+
+        swapchainCerr() << "HDR output requested, but no native HDR surface format was found. Falling back to SDR."
+                        << std::endl;
+    }
+
+    return chooseSdrSurfaceFormat(availableFormats);
 }
 
 VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &surfaceCapabilities, uint32_t width, uint32_t height) {
@@ -133,7 +159,9 @@ void vk::Swapchain::reconstruct() {
                         << " ColorSpace: " << surfaceFormats[i].colorSpace << std::endl;
     }
 #endif
-    surfaceFormat_ = chooseSurfaceFormat(surfaceFormats);
+    bool hdrActive = false;
+    surfaceFormat_ = chooseSurfaceFormat(surfaceFormats, Renderer::options.hdrEnabled, hdrActive);
+    Renderer::options.hdrActive = hdrActive;
 
     // Find supported present modes
     uint32_t presentModeCount;

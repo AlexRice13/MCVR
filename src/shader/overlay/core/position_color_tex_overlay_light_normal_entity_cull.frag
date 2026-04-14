@@ -26,5 +26,5 @@ void main() {
     if (color.a < 0.1) { discard; }
     color *= vertexColor * ubo.colorModulator;
     color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);
-    fragColor = color;
+    fragColor = radianceConvertOverlaySdrToHdr(color, ubo);
 }

@@ -84,9 +84,7 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
         sharedImages_[frameIndex][0] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, extent.width, extent.height, 1, blueprint->imageFormats_[0],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
         );
     }
 

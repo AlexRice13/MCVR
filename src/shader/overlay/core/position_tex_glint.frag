@@ -22,5 +22,5 @@ void main() {
 
     vec4 color = texture(textures[nonuniformEXT(ubo.texIndices[0])], texCoord0) * ubo.colorModulator;
     if (color.a < 0.1) { discard; }
-    fragColor = vec4(color.rgb * ubo.glintAlpha, color.a);
+    fragColor = radianceConvertOverlaySdrToHdr(vec4(color.rgb * ubo.glintAlpha, color.a), ubo);
 }

@@ -502,6 +502,10 @@ void ToneMappingModuleContext::render() {
         std::clamp(module->exposureMeteringMode_, static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL),
                    static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER));
     pc.centerMeteringPercent = sanitizedCenterMeteringPercent;
+    pc.hdrActive = Renderer::options.hdrActive ? 1 : 0;
+    pc.hdrMinLuminance = std::max(Renderer::options.hdrMinLuminance, 0.0f);
+    pc.hdrMaxLuminance = std::max(Renderer::options.hdrMaxLuminance, pc.hdrMinLuminance + 1e-3f);
+    pc.hdrGamma = std::max(Renderer::options.hdrGamma, 1e-3f);
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
