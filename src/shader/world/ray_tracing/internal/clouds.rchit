@@ -20,6 +20,7 @@
 
 #define CLOUD_CELL_SIZE      12.0
 #define CLOUD_GRID_SIZE      256       // cells per axis (must match Java)
+#define CLOUD_DENSITY_SCALE  5.0       // extinction multiplier so clouds actually block light
 
 // ─── Multi-scattering parameters ───────────────────────────────────────────────
 #define MS_OCTAVES           6
@@ -96,38 +97,40 @@ hitAttributeEXT vec2 attribs;
 // ─── Cloud coverage sampling ───────────────────────────────────────────────────
 // Read one byte from the SSBO (grid cell occupancy: 0 or 255)
 float readCloudCell(int cx, int cz) {
+    cx &= (CLOUD_GRID_SIZE - 1);
+    cz &= (CLOUD_GRID_SIZE - 1);
     int idx = cz * CLOUD_GRID_SIZE + cx;
     uint packed = cloudCoverage.cells[idx >> 2];
     uint byteVal = (packed >> ((idx & 3) * 8)) & 0xFFu;
     return float(byteVal) / 255.0;
 }
 
-// Complementary Reimagined-style smoothstep coordinate rounding + bilinear interpolation.
-// Pushes sample points toward cell centers near edges, combined with bilinear filtering
-// this creates smooth density gradients at cloud boundaries while maintaining full density
-// inside contiguous cloud regions.
-float sampleCloudCoverage(vec2 worldXZ) {
+// Distance-based edge falloff: full density inside, smooth falloff toward air neighbors.
+// Avoids the hollowness/cross artifacts of smoothstep-rounding + bilinear on binary data.
+float sampleCloudCoverage(vec2 worldXZ, float edgeSoftness) {
     vec2 gridPos = worldXZ / CLOUD_CELL_SIZE;
+    ivec2 cell = ivec2(floor(gridPos));
+    vec2 localPos = fract(gridPos);  // [0,1) within cell
 
-    // Smoothstep rounding: modify fractional part to push toward 0 or 1
-    // This mimics Complementary's GetRoundedCloudCoord
-    vec2 rounded = floor(gridPos) + smoothstep(0.375, 0.625, fract(gridPos));
+    // If this cell is air, no cloud
+    float center = readCloudCell(cell.x, cell.y);
+    if (center < 0.5) return 0.0;
 
-    // Manual bilinear interpolation (equivalent to LINEAR texture sampling)
-    // Texel N is centered at N+0.5 in continuous coords, so subtract 0.5
-    vec2 texelPos = rounded - 0.5;
-    ivec2 c00 = ivec2(floor(texelPos)) & (CLOUD_GRID_SIZE - 1);
-    ivec2 c10 = (c00 + ivec2(1, 0)) & (CLOUD_GRID_SIZE - 1);
-    ivec2 c01 = (c00 + ivec2(0, 1)) & (CLOUD_GRID_SIZE - 1);
-    ivec2 c11 = (c00 + ivec2(1, 1)) & (CLOUD_GRID_SIZE - 1);
-    vec2 bilinF = fract(texelPos);
+    // Check 4 direct neighbors
+    float nXn = readCloudCell(cell.x - 1, cell.y);
+    float nXp = readCloudCell(cell.x + 1, cell.y);
+    float nZn = readCloudCell(cell.x, cell.y - 1);
+    float nZp = readCloudCell(cell.x, cell.y + 1);
 
-    float v00 = readCloudCell(c00.x, c00.y);
-    float v10 = readCloudCell(c10.x, c10.y);
-    float v01 = readCloudCell(c01.x, c01.y);
-    float v11 = readCloudCell(c11.x, c11.y);
+    // Distance to each edge; apply falloff only toward air neighbors
+    float edge = 1.0;
+    float soft = max(edgeSoftness, 0.02);  // avoid division by zero
+    if (nXn < 0.5) edge *= smoothstep(0.0, soft, localPos.x);
+    if (nXp < 0.5) edge *= smoothstep(0.0, soft, 1.0 - localPos.x);
+    if (nZn < 0.5) edge *= smoothstep(0.0, soft, localPos.y);
+    if (nZp < 0.5) edge *= smoothstep(0.0, soft, 1.0 - localPos.y);
 
-    return mix(mix(v00, v10, bilinF.x), mix(v01, v11, bilinF.x), bilinF.y);
+    return edge;
 }
 
 // ─── Henyey-Greenstein phase function ──────────────────────────────────────────
@@ -175,6 +178,7 @@ float selfShadow(float lightDist, float opacity) {
 
 // ─── Multi-scattering approximation (Schneider 2015 / Hillaire 2020) ──────────
 vec3 multiScatterStep(float od, float lightDist, float opacity,
+                      float localCoverage,
                       float cosTheta, float anisotropy,
                       vec3 sunColor, vec3 skyLight) {
     vec3 totalScatter = vec3(0.0);
@@ -182,9 +186,12 @@ vec3 multiScatterStep(float od, float lightDist, float opacity,
     float contMul = 1.0;
     float curAnisotropy = anisotropy;
 
+    // Light path OD accounts for local coverage so dense regions properly self-shadow
+    float baseLightOD = lightDist * opacity * CLOUD_DENSITY_SCALE * localCoverage;
+
     for (int n = 0; n < MS_OCTAVES; n++) {
         float effOD = od * max(attMul, 0.001);
-        float effShadow = exp2(-lightDist * opacity * 2.0 * attMul);
+        float effShadow = exp2(-baseLightOD * attMul);
         float integral = scatterIntegral(effOD, 1.11);
         float bp = powder(effOD * log(2.0));
         float curPhase = cloudPhase(cosTheta, curAnisotropy);
@@ -258,6 +265,7 @@ void main() {
     float densityGrad = skyUBO.cloudDensityGradient;
     float opacity     = skyUBO.cloudOpacity;
     float anisotropy  = skyUBO.cloudAnisotropy;
+    float edgeSoftness = skyUBO.cloudEdgeSoftness;
 
     // Wind offsets for grid lookup
     vec2 windOffset = vec2(skyUBO.cloudWindOffsetX, skyUBO.cloudWindOffsetZ);
@@ -288,17 +296,18 @@ void main() {
 
         // Sample 2D cloud coverage map using wind-shifted world position
         vec2 shiftedXZ = marchPos.xz + windOffset;
-        float coverage = sampleCloudCoverage(shiftedXZ);
+        float coverage = sampleCloudCoverage(shiftedXZ, edgeSoftness);
 
-        // Combine: coverage from map × vertical profile × opacity
-        float density = coverage * mix(1.0, vertProfile, densityGrad) * opacity;
+        // Combine: coverage × vertical profile × opacity × density scale
+        float density = coverage * mix(1.0, vertProfile, densityGrad) * opacity * CLOUD_DENSITY_SCALE;
 
         float od = stepLength * density;
         if (od <= 0.0) continue;
 
-        // Multi-scattering
+        // Multi-scattering (coverage passed for light-path attenuation)
         float lightDist = lightPathDistance(marchPos, lightDir);
         vec3 stepScatter = multiScatterStep(od, lightDist, opacity,
+                                            coverage,
                                             lDotW, anisotropy, sunColor, skyLight);
 
         scattering += stepScatter * transmittance;

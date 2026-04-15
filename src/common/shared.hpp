@@ -314,7 +314,7 @@ namespace Data {
         T_FLOAT sunAngularRadius;  // half-angle in radians for sun disc and shadow cone
         T_FLOAT cloudWindOffsetX;  // ticks * 0.03 for wind-shifted cloud grid lookup
         T_FLOAT cloudWindOffsetZ;  // constant 3.96 Z-offset for cloud grid lookup
-        T_FLOAT pad5;
+        T_FLOAT cloudEdgeSoftness; // 0..1: controls edge falloff width (fraction of cell)
     };
 
     struct TextureMapEntry {
