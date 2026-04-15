@@ -151,26 +151,35 @@ float scatterIntegral(float od, float coeff) {
     return exp2(a * od) * b + c;
 }
 
-// ─── Self-shadow ───────────────────────────────────────────────────────────────
-float lightPathDistance(vec3 p, vec3 lightDir) {
+// ─── Light-path optical depth (marches toward sun sampling actual coverage) ──
+float lightMarchOD(vec3 p, vec3 lightDir, float opacity, float densityGrad,
+                   vec2 windOffset, float edgeSoftness) {
+    const int LIGHT_STEPS = 5;
     float distToExit;
-    if (lightDir.y > 0.001) {
+    if (lightDir.y > 0.001)
         distToExit = (CLOUD_MAX_HEIGHT - p.y) / lightDir.y;
-    } else if (lightDir.y < -0.001) {
+    else if (lightDir.y < -0.001)
         distToExit = (CLOUD_MIN_HEIGHT - p.y) / lightDir.y;
-    } else {
-        distToExit = 20.0;
-    }
-    return max(distToExit, 0.0);
-}
+    else
+        distToExit = CLOUD_CELL_SIZE;
+    distToExit = clamp(distToExit, 0.0, CLOUD_CELL_SIZE * 3.0);
 
-float selfShadow(float lightDist, float opacity) {
-    return exp2(-lightDist * opacity * 2.0);
+    float stepLen = distToExit / float(LIGHT_STEPS);
+    float totalOD = 0.0;
+    vec3 pos = p + lightDir * stepLen * 0.5;
+
+    for (int i = 0; i < LIGHT_STEPS; i++) {
+        float hFrac = clamp((pos.y - CLOUD_MIN_HEIGHT) / CLOUD_THICKNESS, 0.0, 1.0);
+        float vertP = smoothstep(0.0, 0.5, hFrac) * smoothstep(1.0, 0.5, hFrac);
+        float cov = sampleCloudCoverage(pos.xz + windOffset, edgeSoftness);
+        totalOD += cov * mix(1.0, vertP, densityGrad) * opacity * CLOUD_DENSITY_SCALE * stepLen;
+        pos += lightDir * stepLen;
+    }
+    return totalOD;
 }
 
 // ─── Multi-scattering approximation (Schneider 2015 / Hillaire 2020) ──────────
-vec3 multiScatterStep(float od, float lightDist, float opacity,
-                      float localCoverage,
+vec3 multiScatterStep(float od, float lightOD,
                       float cosTheta, float anisotropy,
                       vec3 sunColor, vec3 skyLight) {
     vec3 totalScatter = vec3(0.0);
@@ -178,12 +187,9 @@ vec3 multiScatterStep(float od, float lightDist, float opacity,
     float contMul = 1.0;
     float curAnisotropy = anisotropy;
 
-    // Light path OD accounts for local coverage so dense regions properly self-shadow
-    float baseLightOD = lightDist * opacity * CLOUD_DENSITY_SCALE * localCoverage;
-
     for (int n = 0; n < MS_OCTAVES; n++) {
         float effOD = od * max(attMul, 0.001);
-        float effShadow = exp2(-baseLightOD * attMul);
+        float effShadow = exp2(-lightOD * attMul);
         float integral = scatterIntegral(effOD, 1.11);
         float bp = powder(effOD * log(2.0));
         float curPhase = cloudPhase(cosTheta, curAnisotropy);
@@ -269,8 +275,14 @@ void main() {
 
     float lDotW = dot(lightDir, rayDir);
 
-    // Sky ambient
-    vec3 skyLight = texture(skyFull, vec3(0.0, 1.0, 0.0)).rgb;
+    // Hemisphere-integrated sky ambient from cubemap (captures atmospheric color)
+    vec3 skyUp    = texture(skyFull, vec3(0.0,  1.0, 0.0)).rgb;
+    vec3 skyDown  = texture(skyFull, vec3(0.0, -1.0, 0.0)).rgb;
+    vec3 skyHoriz = 0.25 * (texture(skyFull, vec3( 1.0, 0.15, 0.0)).rgb
+                          + texture(skyFull, vec3(-1.0, 0.15, 0.0)).rgb
+                          + texture(skyFull, vec3(0.0, 0.15,  1.0)).rgb
+                          + texture(skyFull, vec3(0.0, 0.15, -1.0)).rgb);
+    vec3 skyLight = skyUp * 0.4 + skyHoriz * 0.45 + skyDown * 0.15;
 
     // Sun color via shadow ray from cloud top
     vec3 cloudTopPos = worldOrigin + rayDir * tEntry;
@@ -296,10 +308,10 @@ void main() {
         float od = stepLength * density;
         if (od <= 0.0) continue;
 
-        // Multi-scattering (coverage passed for light-path attenuation)
-        float lightDist = lightPathDistance(marchPos, lightDir);
-        vec3 stepScatter = multiScatterStep(od, lightDist, opacity,
-                                            coverage,
+        // Light-path self-shadow (marches toward sun through actual cloud coverage)
+        float lightOD = lightMarchOD(marchPos, lightDir, opacity, densityGrad,
+                                     windOffset, edgeSoftness);
+        vec3 stepScatter = multiScatterStep(od, lightOD,
                                             lDotW, anisotropy, sunColor, skyLight);
 
         scattering += stepScatter * transmittance;
