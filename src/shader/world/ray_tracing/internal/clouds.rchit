@@ -20,6 +20,19 @@
 #define CLOUD_MARCH_STEPS    8
 #define SUN_BRIGHTNESS       3.0
 
+// ─── Noise FBM parameters ──────────────────────────────────────────────────────
+#define NOISE_BASE_SCALE     0.03   // world→UV; features ~33 blocks wide
+#define NOISE_OCTAVES        3
+#define NOISE_LACUNARITY     2.3
+#define NOISE_GAIN           0.45
+#define NOISE_STRENGTH       0.65   // 0 = no noise, 1 = full noise modulation
+
+// ─── Multi-scattering parameters ───────────────────────────────────────────────
+#define MS_OCTAVES           6      // scattering orders to approximate
+#define MS_ATTENUATION       0.35   // extinction reduction per octave
+#define MS_CONTRIBUTION      0.45   // energy contribution per octave
+#define MS_PHASE_DECAY       0.50   // anisotropy decay per octave
+
 // ─── Descriptor sets ───────────────────────────────────────────────────────────
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 0, binding = 2) uniform samplerCube skyFull;
@@ -95,6 +108,27 @@ float cloudPhase(float cosTheta, float anisotropy) {
     return mix(lobe2, lobe1, 0.6);
 }
 
+// ─── 3D noise FBM for cloud density ────────────────────────────────────────────
+float cloudNoiseFBM(vec3 worldPos) {
+    float value = 0.0;
+    float amplitude = 1.0;
+    float frequency = 1.0;
+    float maxAmp = 0.0;
+    for (int i = 0; i < NOISE_OCTAVES; i++) {
+        value += texture(noiseTexture3D, worldPos * NOISE_BASE_SCALE * frequency).r * amplitude;
+        maxAmp += amplitude;
+        frequency *= NOISE_LACUNARITY;
+        amplitude *= NOISE_GAIN;
+    }
+    return value / maxAmp;
+}
+
+float noiseDensity(vec3 worldPos, float baseDensity) {
+    float noise = cloudNoiseFBM(worldPos);
+    float noiseMod = smoothstep(0.2, 0.7, noise);
+    return baseDensity * mix(1.0, noiseMod, NOISE_STRENGTH);
+}
+
 // ─── Beer-powder ───────────────────────────────────────────────────────────────
 float powder(float od) {
     return 1.0 - exp2(-od * 2.0);
@@ -108,19 +142,50 @@ float scatterIntegral(float od, float coeff) {
 }
 
 // ─── Analytical self-shadow for uniform-density box ────────────────────────────
-// Computes how much cloud the sun ray traverses from point p upward through
-// the cloud slab. Density is modulated by the opacity parameter.
-float selfShadow(vec3 p, vec3 lightDir, float opacity) {
+// Returns the distance from point p to the slab exit along lightDir.
+float lightPathDistance(vec3 p, vec3 lightDir) {
     float distToExit;
     if (lightDir.y > 0.001) {
         distToExit = (CLOUD_MAX_HEIGHT - p.y) / lightDir.y;
     } else if (lightDir.y < -0.001) {
         distToExit = (CLOUD_MIN_HEIGHT - p.y) / lightDir.y;
     } else {
-        distToExit = 20.0;  // horizontal sun → long path through cloud
+        distToExit = 20.0;
     }
-    distToExit = max(distToExit, 0.0);
-    return exp2(-distToExit * opacity * 2.0);
+    return max(distToExit, 0.0);
+}
+
+float selfShadow(float lightDist, float opacity) {
+    return exp2(-lightDist * opacity * 2.0);
+}
+
+// ─── Multi-scattering approximation (Schneider 2015 / Hillaire 2020) ──────────
+// Approximates higher-order scattering by progressively reducing extinction and
+// isotropizing the phase function across multiple octaves.
+vec3 multiScatterStep(float od, float lightDist, float opacity,
+                      float cosTheta, float anisotropy,
+                      vec3 sunColor, vec3 skyLight) {
+    vec3 totalScatter = vec3(0.0);
+    float attMul = 1.0;
+    float contMul = 1.0;
+    float curAnisotropy = anisotropy;
+
+    for (int n = 0; n < MS_OCTAVES; n++) {
+        float effOD = od * max(attMul, 0.001);
+        float effShadow = exp2(-lightDist * opacity * 2.0 * attMul);
+        float integral = scatterIntegral(effOD, 1.11);
+        float bp = powder(effOD * log(2.0));
+        float curPhase = cloudPhase(cosTheta, curAnisotropy);
+
+        vec3 sunLit = sunColor * effShadow * bp * curPhase * (PI * 0.5) * SUN_BRIGHTNESS;
+        vec3 skyLit = skyLight * 0.25 * INV_PI;
+        totalScatter += (sunLit + skyLit) * integral * PI * contMul;
+
+        attMul *= MS_ATTENUATION;
+        contMul *= MS_CONTRIBUTION;
+        curAnisotropy *= MS_PHASE_DECAY;
+    }
+    return totalScatter;
 }
 
 // ─── Bayer dithering ───────────────────────────────────────────────────────────
@@ -192,7 +257,6 @@ void main() {
     if (lightDir.y < 0.0) lightDir = -lightDir;
 
     float lDotW = dot(lightDir, rayDir);
-    float phase = cloudPhase(lDotW, anisotropy);
 
     // Sky ambient
     vec3 skyLight = texture(skyFull, vec3(0.0, 1.0, 0.0)).rgb;
@@ -210,18 +274,18 @@ void main() {
         // Vertical density profile: smoothstep fade at top/bottom of cloud slab
         float heightFrac = clamp((marchPos.y - CLOUD_MIN_HEIGHT) / CLOUD_THICKNESS, 0.0, 1.0);
         float vertProfile = smoothstep(0.0, 0.5, heightFrac) * smoothstep(1.0, 0.5, heightFrac);
-        float density = mix(1.0, vertProfile, densityGrad) * opacity;
+        float baseDensity = mix(1.0, vertProfile, densityGrad) * opacity;
+
+        // Modulate with 3D noise FBM for internal cloud structure
+        float density = noiseDensity(marchPos, baseDensity);
 
         float od = stepLength * density;
         if (od <= 0.0) continue;
 
-        float shadow = selfShadow(marchPos, lightDir, opacity);
-        float integral = scatterIntegral(od, 1.11);
-        float bp = powder(od * log(2.0));
-
-        vec3 sunLit = sunColor * shadow * bp * phase * (PI * 0.5) * SUN_BRIGHTNESS;
-        vec3 skyLit = skyLight * 0.25 * INV_PI;
-        vec3 stepScatter = (sunLit + skyLit) * integral * PI;
+        // Multi-scattering: replaces single-scatter with octave-based approximation
+        float lightDist = lightPathDistance(marchPos, lightDir);
+        vec3 stepScatter = multiScatterStep(od, lightDist, opacity,
+                                            lDotW, anisotropy, sunColor, skyLight);
 
         scattering += stepScatter * transmittance;
         transmittance *= exp2(-od);
