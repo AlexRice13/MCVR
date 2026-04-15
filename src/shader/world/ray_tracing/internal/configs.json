@@ -24,6 +24,13 @@
         "rahit": "clouds.rahit"
       }
     },
+    "cloud_shadow": {
+      "type": "triangle",
+      "shaders": {
+        "rchit": "shadow.rchit",
+        "rahit": "cloud_shadow.rahit"
+      }
+    },
     "end_gateway": {
       "type": "triangle",
       "shaders": {

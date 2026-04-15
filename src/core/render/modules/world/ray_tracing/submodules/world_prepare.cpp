@@ -266,7 +266,17 @@ void WorldPrepareContext::render() {
                     throw std::runtime_error("prebuilt blas not implemented yet!");
                 }
 
-                hitGroupIndices.push_back(shadowHitGroupIndex);
+                // Use cloud_shadow hit group for cloud entities so shadow rays
+                // compute volumetric attenuation instead of reading invalid vertex data.
+                bool isCloudEntity = false;
+                if (entities1[i]->geometryGroupNames != nullptr) {
+                    for (const auto &gn : *entities1[i]->geometryGroupNames) {
+                        if (gn == "clouds") { isCloudEntity = true; break; }
+                    }
+                }
+                hitGroupIndices.push_back(isCloudEntity
+                    ? rayTracingModule->hitGroupIndexForName("cloud_shadow")
+                    : shadowHitGroupIndex);
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
                     const std::string &groupName =
                         entities1[i]->geometryGroupNames != nullptr &&

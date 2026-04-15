@@ -1,0 +1,95 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "util/ray.glsl"
+#include "common/shared.hpp"
+
+// ─── Descriptor bindings ───────────────────────────────────────────────────────
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 2) uniform SkyUniform {
+    SkyUBO skyUBO;
+};
+
+layout(std430, set = 2, binding = 3) readonly buffer CloudCoverage {
+    uint cells[];
+} cloudCoverage;
+
+layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
+
+// ─── Cloud parameters (must match clouds.rchit) ───────────────────────────────
+#define CLOUD_CELL_SIZE     12.0
+#define CLOUD_GRID_SIZE     256
+#define CLOUD_THICKNESS     4.0
+#define CLOUD_DENSITY_SCALE 5.0
+
+// ─── Coverage sampling ─────────────────────────────────────────────────────────
+float readCloudCell(int cx, int cz) {
+    cx &= (CLOUD_GRID_SIZE - 1);
+    cz &= (CLOUD_GRID_SIZE - 1);
+    int idx = cz * CLOUD_GRID_SIZE + cx;
+    uint packed = cloudCoverage.cells[idx >> 2];
+    uint byteVal = (packed >> ((idx & 3) * 8)) & 0xFFu;
+    return float(byteVal) / 255.0;
+}
+
+float sampleCloudCoverage(vec2 worldXZ, float edgeSoftness) {
+    vec2 gridPos = worldXZ / CLOUD_CELL_SIZE;
+    vec2 samplePos = gridPos - 0.5;
+    ivec2 base = ivec2(floor(samplePos));
+    vec2 f = fract(samplePos);
+
+    float v00 = readCloudCell(base.x,     base.y);
+    float v10 = readCloudCell(base.x + 1, base.y);
+    float v01 = readCloudCell(base.x,     base.y + 1);
+    float v11 = readCloudCell(base.x + 1, base.y + 1);
+
+    float raw = mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    return smoothstep(0.0, edgeSoftness, raw);
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────────
+void main() {
+    // Only attenuate on entry faces (front-facing) to avoid double-counting
+    // when the ray exits through the back face of the same cell.
+    // 0xFEu = gl_HitKindFrontFacingTriangleEXT
+    if (gl_HitKindEXT != 0xFEu) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    // Compute world-space hit position
+    vec3 hitPos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+    vec3 worldPos = vec3(worldUBO.cameraPos.xyz) + hitPos;
+
+    // Sample cloud coverage at wind-shifted position
+    vec2 windOffset = vec2(skyUBO.cloudWindOffsetX, skyUBO.cloudWindOffsetZ);
+    vec2 shiftedXZ = worldPos.xz + windOffset;
+    float coverage = sampleCloudCoverage(shiftedXZ, skyUBO.cloudEdgeSoftness);
+
+    if (coverage < 0.01) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    // Estimate path length through the cloud slab for this cell
+    vec3 rayDir = gl_WorldRayDirectionEXT;
+    float pathLength = CLOUD_THICKNESS / max(abs(rayDir.y), 0.05);
+    pathLength = min(pathLength, CLOUD_CELL_SIZE * 3.0);
+
+    // Average vertical density profile (symmetric smoothstep ~ 0.5 mean)
+    float avgVertProfile = 0.5;
+    float density = coverage
+                  * mix(1.0, avgVertProfile, skyUBO.cloudDensityGradient)
+                  * skyUBO.cloudOpacity
+                  * CLOUD_DENSITY_SCALE;
+
+    float opticalDepth = density * pathLength;
+    float transmittance = exp(-opticalDepth);
+
+    shadowRay.throughput *= transmittance;
+    ignoreIntersectionEXT;
+}
