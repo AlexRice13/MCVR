@@ -11,8 +11,6 @@
 #include "common/shared.hpp"
 
 // ─── Parameters ────────────────────────────────────────────────────────────────
-// Vanilla cloud layer: 4 blocks tall at cloudHeight (192).
-// Geometry is per-cell 12×4×12 boxes — the shader only does volumetric lighting.
 #define CLOUD_MIN_HEIGHT     192.0
 #define CLOUD_THICKNESS      4.0
 #define CLOUD_MAX_HEIGHT     (CLOUD_MIN_HEIGHT + CLOUD_THICKNESS)
@@ -20,18 +18,14 @@
 #define CLOUD_MARCH_STEPS    8
 #define SUN_BRIGHTNESS       3.0
 
-// ─── Noise FBM parameters ──────────────────────────────────────────────────────
-#define NOISE_BASE_SCALE     0.03   // world→UV; features ~33 blocks wide
-#define NOISE_OCTAVES        3
-#define NOISE_LACUNARITY     2.3
-#define NOISE_GAIN           0.45
-#define NOISE_STRENGTH       0.65   // 0 = no noise, 1 = full noise modulation
+#define CLOUD_CELL_SIZE      12.0
+#define CLOUD_GRID_SIZE      256       // cells per axis (must match Java)
 
 // ─── Multi-scattering parameters ───────────────────────────────────────────────
-#define MS_OCTAVES           6      // scattering orders to approximate
-#define MS_ATTENUATION       0.35   // extinction reduction per octave
-#define MS_CONTRIBUTION      0.45   // energy contribution per octave
-#define MS_PHASE_DECAY       0.50   // anisotropy decay per octave
+#define MS_OCTAVES           6
+#define MS_ATTENUATION       0.35
+#define MS_CONTRIBUTION      0.45
+#define MS_PHASE_DECAY       0.50
 
 // ─── Descriptor sets ───────────────────────────────────────────────────────────
 layout(set = 0, binding = 0) uniform sampler2D textures[];
@@ -76,6 +70,11 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
+// Cloud coverage SSBO — 256×256 bytes packed as uint32
+layout(std430, set = 2, binding = 3) readonly buffer CloudCoverage {
+    uint cells[];
+} cloudCoverage;
+
 layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
 layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
 layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
@@ -94,6 +93,43 @@ layout(location = 0) rayPayloadInEXT MainRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
+// ─── Cloud coverage sampling ───────────────────────────────────────────────────
+// Read one byte from the SSBO (grid cell occupancy: 0 or 255)
+float readCloudCell(int cx, int cz) {
+    int idx = cz * CLOUD_GRID_SIZE + cx;
+    uint packed = cloudCoverage.cells[idx >> 2];
+    uint byteVal = (packed >> ((idx & 3) * 8)) & 0xFFu;
+    return float(byteVal) / 255.0;
+}
+
+// Complementary Reimagined-style smoothstep coordinate rounding + bilinear interpolation.
+// Pushes sample points toward cell centers near edges, combined with bilinear filtering
+// this creates smooth density gradients at cloud boundaries while maintaining full density
+// inside contiguous cloud regions.
+float sampleCloudCoverage(vec2 worldXZ) {
+    vec2 gridPos = worldXZ / CLOUD_CELL_SIZE;
+
+    // Smoothstep rounding: modify fractional part to push toward 0 or 1
+    // This mimics Complementary's GetRoundedCloudCoord
+    vec2 rounded = floor(gridPos) + smoothstep(0.375, 0.625, fract(gridPos));
+
+    // Manual bilinear interpolation (equivalent to LINEAR texture sampling)
+    // Texel N is centered at N+0.5 in continuous coords, so subtract 0.5
+    vec2 texelPos = rounded - 0.5;
+    ivec2 c00 = ivec2(floor(texelPos)) & (CLOUD_GRID_SIZE - 1);
+    ivec2 c10 = (c00 + ivec2(1, 0)) & (CLOUD_GRID_SIZE - 1);
+    ivec2 c01 = (c00 + ivec2(0, 1)) & (CLOUD_GRID_SIZE - 1);
+    ivec2 c11 = (c00 + ivec2(1, 1)) & (CLOUD_GRID_SIZE - 1);
+    vec2 bilinF = fract(texelPos);
+
+    float v00 = readCloudCell(c00.x, c00.y);
+    float v10 = readCloudCell(c10.x, c10.y);
+    float v01 = readCloudCell(c01.x, c01.y);
+    float v11 = readCloudCell(c11.x, c11.y);
+
+    return mix(mix(v00, v10, bilinF.x), mix(v01, v11, bilinF.x), bilinF.y);
+}
+
 // ─── Henyey-Greenstein phase function ──────────────────────────────────────────
 float hgPhase(float cosTheta, float g) {
     float g2 = g * g;
@@ -101,32 +137,11 @@ float hgPhase(float cosTheta, float g) {
 }
 
 float cloudPhase(float cosTheta, float anisotropy) {
-    float g1 =  0.8 * anisotropy;   // forward scattering lobe
-    float g2 = -0.5 * anisotropy;   // back scattering lobe
+    float g1 =  0.8 * anisotropy;
+    float g2 = -0.5 * anisotropy;
     float lobe1 = hgPhase(cosTheta, g1);
     float lobe2 = hgPhase(cosTheta, g2);
     return mix(lobe2, lobe1, 0.6);
-}
-
-// ─── 3D noise FBM for cloud density ────────────────────────────────────────────
-float cloudNoiseFBM(vec3 worldPos) {
-    float value = 0.0;
-    float amplitude = 1.0;
-    float frequency = 1.0;
-    float maxAmp = 0.0;
-    for (int i = 0; i < NOISE_OCTAVES; i++) {
-        value += texture(noiseTexture3D, worldPos * NOISE_BASE_SCALE * frequency).r * amplitude;
-        maxAmp += amplitude;
-        frequency *= NOISE_LACUNARITY;
-        amplitude *= NOISE_GAIN;
-    }
-    return value / maxAmp;
-}
-
-float noiseDensity(vec3 worldPos, float baseDensity) {
-    float noise = cloudNoiseFBM(worldPos);
-    float noiseMod = smoothstep(0.2, 0.7, noise);
-    return baseDensity * mix(1.0, noiseMod, NOISE_STRENGTH);
 }
 
 // ─── Beer-powder ───────────────────────────────────────────────────────────────
@@ -141,8 +156,7 @@ float scatterIntegral(float od, float coeff) {
     return exp2(a * od) * b + c;
 }
 
-// ─── Analytical self-shadow for uniform-density box ────────────────────────────
-// Returns the distance from point p to the slab exit along lightDir.
+// ─── Self-shadow ───────────────────────────────────────────────────────────────
 float lightPathDistance(vec3 p, vec3 lightDir) {
     float distToExit;
     if (lightDir.y > 0.001) {
@@ -160,8 +174,6 @@ float selfShadow(float lightDist, float opacity) {
 }
 
 // ─── Multi-scattering approximation (Schneider 2015 / Hillaire 2020) ──────────
-// Approximates higher-order scattering by progressively reducing extinction and
-// isotropizing the phase function across multiple octaves.
 vec3 multiScatterStep(float od, float lightDist, float opacity,
                       float cosTheta, float anisotropy,
                       vec3 sunColor, vec3 skyLight) {
@@ -215,19 +227,15 @@ void main() {
     vec3 camWorldPos = vec3(worldUbo.cameraPos.xyz);
     vec3 worldOrigin = camWorldPos + rayOrigin;
 
-    // The ray hit a vanilla cloud cell box face at gl_HitTEXT.
-    // Compute entry/exit through the cloud Y-slab from the hit point onward.
     float tEntry = gl_HitTEXT;
 
     float tExit;
     if (abs(rayDir.y) < 1e-6) {
-        // Near-horizontal ray inside cloud → march up to 20 blocks
         tExit = tEntry + 20.0;
     } else {
-        // Find where ray exits the Y-slab
         float tBot = (CLOUD_MIN_HEIGHT - worldOrigin.y) / rayDir.y;
         float tTop = (CLOUD_MAX_HEIGHT - worldOrigin.y) / rayDir.y;
-        tExit = max(tBot, tTop);  // the farther slab boundary
+        tExit = max(tBot, tTop);
     }
 
     tExit = max(tExit, tEntry + 0.01);
@@ -237,7 +245,7 @@ void main() {
     vec2 pixelCoord = vec2(gl_LaunchIDEXT.xy);
     float dither = bayer16(pixelCoord);
 
-    // ── Volume ray march through the box ──
+    // ── Volume ray march ──
     const int steps = CLOUD_MARCH_STEPS;
     float stepLength = marchDist / float(steps);
     vec3 increment = rayDir * stepLength;
@@ -246,12 +254,15 @@ void main() {
     vec3  scattering    = vec3(0.0);
     float transmittance = 1.0;
 
-    // Cloud parameters from UBO (Java sliders)
-    float densityGrad = skyUBO.cloudDensityGradient;  // 0..1: vertical profile strength
-    float opacity     = skyUBO.cloudOpacity;          // 0..1: base density multiplier
-    float anisotropy  = skyUBO.cloudAnisotropy;       // 0..1: phase function asymmetry
+    // Cloud parameters from UBO
+    float densityGrad = skyUBO.cloudDensityGradient;
+    float opacity     = skyUBO.cloudOpacity;
+    float anisotropy  = skyUBO.cloudAnisotropy;
 
-    // Sun direction (ensure upward for lighting)
+    // Wind offsets for grid lookup
+    vec2 windOffset = vec2(skyUBO.cloudWindOffsetX, skyUBO.cloudWindOffsetZ);
+
+    // Sun direction
     vec3 sunDir = normalize(skyUBO.sunDirection);
     vec3 lightDir = sunDir;
     if (lightDir.y < 0.0) lightDir = -lightDir;
@@ -271,18 +282,21 @@ void main() {
     vec3 sunColor = shadowRay.radiance;
 
     for (int i = 0; i < steps; i++, marchPos += increment) {
-        // Vertical density profile: smoothstep fade at top/bottom of cloud slab
+        // Vertical density profile
         float heightFrac = clamp((marchPos.y - CLOUD_MIN_HEIGHT) / CLOUD_THICKNESS, 0.0, 1.0);
         float vertProfile = smoothstep(0.0, 0.5, heightFrac) * smoothstep(1.0, 0.5, heightFrac);
-        float baseDensity = mix(1.0, vertProfile, densityGrad) * opacity;
 
-        // Modulate with 3D noise FBM for internal cloud structure
-        float density = noiseDensity(marchPos, baseDensity);
+        // Sample 2D cloud coverage map using wind-shifted world position
+        vec2 shiftedXZ = marchPos.xz + windOffset;
+        float coverage = sampleCloudCoverage(shiftedXZ);
+
+        // Combine: coverage from map × vertical profile × opacity
+        float density = coverage * mix(1.0, vertProfile, densityGrad) * opacity;
 
         float od = stepLength * density;
         if (od <= 0.0) continue;
 
-        // Multi-scattering: replaces single-scatter with octave-based approximation
+        // Multi-scattering
         float lightDist = lightPathDistance(marchPos, lightDir);
         vec3 stepScatter = multiScatterStep(od, lightDist, opacity,
                                             lDotW, anisotropy, sunColor, skyLight);
@@ -306,24 +320,22 @@ void main() {
     mainRay.radiance += scattering * mainRay.throughput;
     mainRay.hitT = gl_HitTEXT;
 
-    // G-buffer normal — cloud tops face up
     mainRay.normal = vec3(0.0, 1.0, 0.0);
 
     rayStoreMaterial(mainRay,
         vec4(1.0, 1.0, 1.0, cloudAlpha),
-        vec3(0.04),   // f0
-        1.0,          // roughness
-        0.0,          // metallic
-        0.0,          // transmission
-        1.5,          // ior
-        0.0           // emission
+        vec3(0.04),
+        1.0,
+        0.0,
+        0.0,
+        1.5,
+        0.0
     );
     mainRay.directLightRadiance = scattering;
     raySetNoisy(mainRay, true);
     raySetSkipFog(mainRay, true);
     mainRay.hasPrevScenePos = 0u;
 
-    // Transparency handling
     if (transmittance > 0.3) {
         passThrough();
         mainRay.throughput *= transmittance;

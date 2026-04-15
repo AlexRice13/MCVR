@@ -33,6 +33,19 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     textureMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
     lightMapUniformBuffer_.resize(size);
+    cloudCoverageBuffer_.resize(size);
+
+    // Pre-create cloud coverage buffers (zero-filled) so descriptors are always valid
+    auto vma = framework->vma();
+    auto device = framework->device();
+    constexpr uint32_t defaultCloudSize = 256 * 256;
+    std::vector<uint8_t> zeros(defaultCloudSize, 0);
+    for (uint32_t i = 0; i < size; i++) {
+        cloudCoverageBuffer_[i] =
+            vk::HostVisibleBuffer::create(vma, device, defaultCloudSize,
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        cloudCoverageBuffer_[i]->uploadToBuffer(zeros.data(), defaultCloudSize, 0);
+    }
 }
 
 void Buffers::resetFrame() {
@@ -536,6 +549,35 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::lightMapUniformBuffer() {
     } else {
         return nullptr;
     }
+}
+
+std::shared_ptr<vk::HostVisibleBuffer> Buffers::cloudCoverageBuffer() {
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+
+    if (cloudCoverageBuffer_[context->frameIndex]) {
+        return cloudCoverageBuffer_[context->frameIndex];
+    } else {
+        return nullptr;
+    }
+}
+
+void Buffers::setAndUploadCloudCoverageBuffer(uint8_t *data, uint32_t width, uint32_t height) {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto vma = framework->vma();
+    auto device = framework->device();
+
+    uint32_t bufferSize = width * height;
+    if (bufferSize == 0) return;
+
+    if (cloudCoverageBuffer_[context->frameIndex] == nullptr) {
+        cloudCoverageBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, bufferSize,
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+
+    cloudCoverageBuffer_[context->frameIndex]->uploadToBuffer(data, bufferSize, 0);
 }
 
 void Buffers::setUseJitter(bool useJitter) {

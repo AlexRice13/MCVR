@@ -312,8 +312,8 @@ namespace Data {
         T_UINT moonTextureID;
 
         T_FLOAT sunAngularRadius;  // half-angle in radians for sun disc and shadow cone
-        T_FLOAT pad3;
-        T_FLOAT pad4;
+        T_FLOAT cloudWindOffsetX;  // ticks * 0.03 for wind-shifted cloud grid lookup
+        T_FLOAT cloudWindOffsetZ;  // constant 3.96 Z-offset for cloud grid lookup
         T_FLOAT pad5;
     };
 

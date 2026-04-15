@@ -115,3 +115,14 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateL
     vk::Data::LightMapUBO *lightMapUBO = reinterpret_cast<vk::Data::LightMapUBO *>(ptr);
     buffers->setAndUploadLightMapUniformBuffer(*lightMapUBO);
 }
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateCloudCoverage(JNIEnv *,
+                                                                                              jclass,
+                                                                                              jlong ptr,
+                                                                                              jint width,
+                                                                                              jint height) {
+    auto buffers = Renderer::instance().buffers();
+    if (buffers == nullptr) return;
+    uint8_t *data = reinterpret_cast<uint8_t *>(ptr);
+    buffers->setAndUploadCloudCoverageBuffer(data, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+}

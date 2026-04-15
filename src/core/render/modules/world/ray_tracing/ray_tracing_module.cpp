@@ -456,6 +456,12 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_VERTEX_BIT |
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 3, // binding 3: cloud coverage SSBO
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .beginDescriptorLayoutSet() // set 3
@@ -1435,6 +1441,7 @@ void RayTracingModuleContext::render() {
     rayTracingDescriptorTable->bindBuffer(worldBuffer, 2, 0);
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
     rayTracingDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
+    rayTracingDescriptorTable->bindBuffer(buffers->cloudCoverageBuffer(), 2, 3);
     if (module->useSharcRuntime_) {
         module->updateSharcConfig(context->frameIndex);
         rayTracingDescriptorTable->bindBuffer(module->sharcConfigBuffers_[context->frameIndex], 4, 0);
