@@ -105,32 +105,24 @@ float readCloudCell(int cx, int cz) {
     return float(byteVal) / 255.0;
 }
 
-// Distance-based edge falloff: full density inside, smooth falloff toward air neighbors.
-// Avoids the hollowness/cross artifacts of smoothstep-rounding + bilinear on binary data.
+// Bilinear interpolation on binary cloud grid with smoothstep remap.
+// Naturally smooth at all junction types: straight, L-shape, single cell.
 float sampleCloudCoverage(vec2 worldXZ, float edgeSoftness) {
     vec2 gridPos = worldXZ / CLOUD_CELL_SIZE;
-    ivec2 cell = ivec2(floor(gridPos));
-    vec2 localPos = fract(gridPos);  // [0,1) within cell
+    // Texel N is centered at N+0.5; subtract 0.5 for correct bilinear math
+    vec2 samplePos = gridPos - 0.5;
+    ivec2 base = ivec2(floor(samplePos));
+    vec2 f = fract(samplePos);
 
-    // If this cell is air, no cloud
-    float center = readCloudCell(cell.x, cell.y);
-    if (center < 0.5) return 0.0;
+    float v00 = readCloudCell(base.x,     base.y);
+    float v10 = readCloudCell(base.x + 1, base.y);
+    float v01 = readCloudCell(base.x,     base.y + 1);
+    float v11 = readCloudCell(base.x + 1, base.y + 1);
 
-    // Check 4 direct neighbors
-    float nXn = readCloudCell(cell.x - 1, cell.y);
-    float nXp = readCloudCell(cell.x + 1, cell.y);
-    float nZn = readCloudCell(cell.x, cell.y - 1);
-    float nZp = readCloudCell(cell.x, cell.y + 1);
+    float raw = mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
 
-    // Distance to each edge; apply falloff only toward air neighbors
-    float edge = 1.0;
-    float soft = max(edgeSoftness, 0.02);  // avoid division by zero
-    if (nXn < 0.5) edge *= smoothstep(0.0, soft, localPos.x);
-    if (nXp < 0.5) edge *= smoothstep(0.0, soft, 1.0 - localPos.x);
-    if (nZn < 0.5) edge *= smoothstep(0.0, soft, localPos.y);
-    if (nZp < 0.5) edge *= smoothstep(0.0, soft, 1.0 - localPos.y);
-
-    return edge;
+    // Remap: values above edgeSoftness become fully opaque, creating tunable edge falloff
+    return smoothstep(0.0, edgeSoftness, raw);
 }
 
 // ─── Henyey-Greenstein phase function ──────────────────────────────────────────
