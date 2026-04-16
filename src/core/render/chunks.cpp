@@ -8,6 +8,26 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <iostream>
+
+namespace {
+std::ostream &chunksCerr() {
+    return std::cerr << "[Chunks] ";
+}
+
+std::string chunkGeometryGroupName(World::GeometryTypes geometryType) {
+    switch (geometryType) {
+        case World::WORLD_SOLID:
+        case World::WORLD_TRANSPARENT: return "default";
+        case World::WORLD_NO_REFLECT: return "world_no_reflect";
+        case World::WORLD_CLOUD: return "clouds";
+        case World::BOAT_WATER_MASK: return "water_mask";
+        case World::END_PORTAL: return "end_portal";
+        case World::END_GATE_WAY: return "end_gateway";
+        default: return "default";
+    }
+}
+} // namespace
 
 ChunkBuildData::ChunkBuildData(int64_t id,
                                int x,
@@ -488,6 +508,45 @@ void Chunks::invalidateChunk(int id) {
 
 // maybe called async
 void Chunks::queueChunkBuild(ChunkBuildTask task) {
+    if (task.id < 0) {
+        chunksCerr() << "received negative chunk id: " << task.id << std::endl;
+        return;
+    }
+
+    if (task.geometryCount < 0) {
+        chunksCerr() << "received negative geometry count for chunk " << task.id << ": " << task.geometryCount
+                     << std::endl;
+        return;
+    }
+
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (static_cast<size_t>(task.id) >= chunks_.size()) {
+        chunksCerr() << "received out-of-range chunk id " << task.id << " (chunk storage size: " << chunks_.size()
+                     << ")" << std::endl;
+        return;
+    }
+
+    auto invalidateChunkUnsafe = [&]() {
+        chunks_[task.id]->invalidate();
+        ChunkPackedData data = {
+            .geometryCount = 0,
+        };
+        chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData), task.id * sizeof(ChunkPackedData));
+    };
+
+    if (task.geometryCount == 0) {
+        chunksCerr() << "received empty chunk build for chunk " << task.id << "; invalidating chunk" << std::endl;
+        invalidateChunkUnsafe();
+        return;
+    }
+
+    if (task.geometryTypes == nullptr || task.geometryTextures == nullptr || task.vertexFormats == nullptr ||
+        task.vertexCounts == nullptr || task.vertices == nullptr) {
+        chunksCerr() << "received incomplete chunk build arrays for chunk " << task.id << std::endl;
+        invalidateChunkUnsafe();
+        return;
+    }
+
     uint32_t allVertexCount = 0, allIndexCount = 0;
     std::vector<World::GeometryTypes> geometryTypes;
     std::vector<std::string> geometryGroupNames;
@@ -495,23 +554,39 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
     std::vector<std::vector<uint32_t>> indices;
 
     for (int i = 0; i < task.geometryCount; i++) {
-        World::GeometryTypes geometryType = static_cast<World::GeometryTypes>(task.geometryTypes[i]);
-        int geometryTexture = task.geometryTextures[i];
-        geometryTypes.push_back(geometryType);
-        if (task.geometryGroupNames != nullptr && task.geometryGroupNames[i] != nullptr) {
-            geometryGroupNames.emplace_back(task.geometryGroupNames[i]);
-        } else {
-            geometryGroupNames.emplace_back("default");
+        const int rawGeometryType = task.geometryTypes[i];
+        if (rawGeometryType < 0 || rawGeometryType >= World::NUM_GEOMETRY_TYPES) {
+            chunksCerr() << "received invalid geometry type " << rawGeometryType << " for chunk " << task.id
+                         << " at geometry " << i << std::endl;
+            invalidateChunkUnsafe();
+            return;
         }
+
+        const int vertexCount = task.vertexCounts[i];
+        if (vertexCount <= 0 || (vertexCount % 4) != 0) {
+            chunksCerr() << "received invalid vertex count " << vertexCount << " for chunk " << task.id
+                         << " at geometry " << i << std::endl;
+            invalidateChunkUnsafe();
+            return;
+        }
+
+        if (task.vertices[i] == nullptr) {
+            chunksCerr() << "received null vertex pointer for chunk " << task.id << " at geometry " << i << std::endl;
+            invalidateChunkUnsafe();
+            return;
+        }
+
+        World::GeometryTypes geometryType = static_cast<World::GeometryTypes>(rawGeometryType);
+        geometryTypes.push_back(geometryType);
+        geometryGroupNames.emplace_back(chunkGeometryGroupName(geometryType));
 
         auto &geometryVertices = vertices.emplace_back();
         auto &geometryIndices = indices.emplace_back();
 
-        geometryVertices.resize(task.vertexCounts[i]);
-        std::memcpy(geometryVertices.data(), task.vertices[i],
-                    task.vertexCounts[i] * sizeof(vk::VertexFormat::PBRVertex));
+        geometryVertices.resize(vertexCount);
+        std::memcpy(geometryVertices.data(), task.vertices[i], vertexCount * sizeof(vk::VertexFormat::PBRVertex));
 
-        for (int j = 0; j < task.vertexCounts[i]; j += 4) {
+        for (int j = 0; j < vertexCount; j += 4) {
             geometryIndices.push_back(j + 0);
             geometryIndices.push_back(j + 1);
             geometryIndices.push_back(j + 2);
@@ -523,13 +598,6 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
         allVertexCount += geometryVertices.size();
         allIndexCount += geometryIndices.size();
     }
-
-    auto framework = Renderer::instance().framework();
-    auto vma = framework->vma();
-    auto device = framework->device();
-    auto physicalDevice = framework->physicalDevice();
-
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
 
     std::shared_ptr<ChunkBuildData> chunkBuildData = ChunkBuildData::create(
         task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++, allVertexCount, allIndexCount,

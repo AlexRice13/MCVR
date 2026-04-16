@@ -26,7 +26,6 @@ struct ChunkBuildTask {
     int64_t id;
     int geometryCount;
     int *geometryTypes;
-    const char **geometryGroupNames;
     int *geometryTextures;
     int *vertexFormats;
     int *vertexCounts;

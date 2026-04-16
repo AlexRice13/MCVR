@@ -23,6 +23,10 @@
 #include <stdexcept>
 #include <unordered_map>
 
+namespace {
+constexpr bool kEnablePrimaryOnlySer = true;
+} // namespace
+
 RayTracingModule::RayTracingModule() {}
 
 void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -1281,11 +1285,17 @@ void RayTracingModule::initPipeline() {
         updateDefinitions = {{"SHARC_UPDATE", "1"}, {"USE_SHARC", "1"}};
     }
 
-    bool useSerRuntime = device->isSerSupported();
-    if (useSerRuntime) {
-        queryDefinitions["USE_SER"] = "1";
-        updateDefinitions["USE_SER"] = "1";
+    bool serSupported = device->isSerSupported();
+    bool usePrimarySerRuntime = serSupported && kEnablePrimaryOnlySer;
+    if (!serSupported && kEnablePrimaryOnlySer) {
+        std::cout << "Ray tracing SER mode request ignored: device does not support SER" << std::endl;
     }
+    std::cout << "Ray tracing SER mode: " << (usePrimarySerRuntime ? "primary_only" : "disabled")
+              << " (device support: " << (serSupported ? "available" : "unavailable") << ")" << std::endl;
+
+    // Primary-only SER preserves the measured perf gain while avoiding the instability seen when
+    // primary is combined with secondary or SHARC-update SER paths.
+    if (usePrimarySerRuntime) { queryDefinitions["USE_SER_PRIMARY"] = "1"; }
 
     worldRayGenQueryShader_ = loadRuntimeShader(rayGenShaderPath, VK_SHADER_STAGE_RAYGEN_BIT_KHR, queryDefinitions);
     worldRayGenUpdateShader_ =
