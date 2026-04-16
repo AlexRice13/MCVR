@@ -150,6 +150,11 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     uint32_t hitGroupCount_ = 0;
     bool sharcCompatible_ = false;
     bool useSharcRuntime_ = false;
+    bool serQueryEnabled_ = false;
+    bool serUpdateEnabled_ = false;
+    bool serQueryDispatchLogged_ = false;
+    bool serUpdateDispatchLogged_ = false;
+    std::string serModeLabel_ = "disabled";
 
     std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
     std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;

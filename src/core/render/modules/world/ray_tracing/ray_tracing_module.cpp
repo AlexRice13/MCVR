@@ -24,7 +24,36 @@
 #include <unordered_map>
 
 namespace {
-constexpr bool kEnablePrimaryOnlySer = true;
+enum class SerDebugMode {
+    Disabled,
+    PrimaryOnly,
+    SecondaryOnly,
+    SharcUpdateOnly,
+};
+
+constexpr SerDebugMode kSerDebugMode = SerDebugMode::PrimaryOnly;
+
+const char *serDebugModeName(SerDebugMode mode) {
+    switch (mode) {
+        case SerDebugMode::Disabled:
+            return "disabled";
+        case SerDebugMode::PrimaryOnly:
+            return "primary_only";
+        case SerDebugMode::SecondaryOnly:
+            return "secondary_only";
+        case SerDebugMode::SharcUpdateOnly:
+            return "sharc_update_only";
+    }
+    return "unknown";
+}
+
+bool serUsesQueryShader(SerDebugMode mode) {
+    return mode == SerDebugMode::PrimaryOnly || mode == SerDebugMode::SecondaryOnly;
+}
+
+bool serUsesUpdateShader(SerDebugMode mode) {
+    return mode == SerDebugMode::SharcUpdateOnly;
+}
 } // namespace
 
 RayTracingModule::RayTracingModule() {}
@@ -1286,16 +1315,32 @@ void RayTracingModule::initPipeline() {
     }
 
     bool serSupported = device->isSerSupported();
-    bool usePrimarySerRuntime = serSupported && kEnablePrimaryOnlySer;
-    if (!serSupported && kEnablePrimaryOnlySer) {
+    SerDebugMode serDebugMode = serSupported ? kSerDebugMode : SerDebugMode::Disabled;
+    serModeLabel_ = serDebugModeName(serDebugMode);
+    serQueryEnabled_ = serUsesQueryShader(serDebugMode);
+    serUpdateEnabled_ = serUsesUpdateShader(serDebugMode);
+    serQueryDispatchLogged_ = false;
+    serUpdateDispatchLogged_ = false;
+
+    if (!serSupported && kSerDebugMode != SerDebugMode::Disabled) {
         std::cout << "Ray tracing SER mode request ignored: device does not support SER" << std::endl;
     }
-    std::cout << "Ray tracing SER mode: " << (usePrimarySerRuntime ? "primary_only" : "disabled")
-              << " (device support: " << (serSupported ? "available" : "unavailable") << ")" << std::endl;
+    std::cout << "Ray tracing SER mode: " << serModeLabel_ << " (device support: "
+              << (serSupported ? "available" : "unavailable") << ")" << std::endl;
 
-    // Primary-only SER preserves the measured perf gain while avoiding the instability seen when
-    // primary is combined with secondary or SHARC-update SER paths.
-    if (usePrimarySerRuntime) { queryDefinitions["USE_SER_PRIMARY"] = "1"; }
+    switch (serDebugMode) {
+        case SerDebugMode::Disabled:
+            break;
+        case SerDebugMode::PrimaryOnly:
+            queryDefinitions["USE_SER_PRIMARY"] = "1";
+            break;
+        case SerDebugMode::SecondaryOnly:
+            queryDefinitions["USE_SER_SECONDARY"] = "1";
+            break;
+        case SerDebugMode::SharcUpdateOnly:
+            updateDefinitions["USE_SER_SHARC_UPDATE"] = "1";
+            break;
+    }
 
     worldRayGenQueryShader_ = loadRuntimeShader(rayGenShaderPath, VK_SHADER_STAGE_RAYGEN_BIT_KHR, queryDefinitions);
     worldRayGenUpdateShader_ =
@@ -1537,6 +1582,12 @@ void RayTracingModuleContext::render() {
         const uint32_t updateHeight =
             (hdrNoisyOutputImage->height() + updateDownsampleFactor - 1) / updateDownsampleFactor;
 
+        if (module->serUpdateEnabled_ && !module->serUpdateDispatchLogged_) {
+            std::cout << "[Ray Tracing] Dispatching SHARC update pipeline with SER mode " << module->serModeLabel_
+                      << std::endl;
+            module->serUpdateDispatchLogged_ = true;
+        }
+
         worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
             ->bindRTPipeline(module->rayTracingUpdatePipeline_)
             ->raytracing(sharcUpdateSbt, updateWidth, updateHeight, 1);
@@ -1561,6 +1612,11 @@ void RayTracingModuleContext::render() {
             .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
             .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
         }});
+    }
+
+    if (module->serQueryEnabled_ && !module->serQueryDispatchLogged_) {
+        std::cout << "[Ray Tracing] Dispatching query pipeline with SER mode " << module->serModeLabel_ << std::endl;
+        module->serQueryDispatchLogged_ = true;
     }
 
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
