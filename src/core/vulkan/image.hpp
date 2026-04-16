@@ -208,6 +208,7 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     VkImageView &vkImageView(int index = 0) override;
     VkImageLayout &imageLayout();
     void *mappedPtr();
+    void releaseStagingBuffer();
 
     void addImageView(VkImageViewCreateInfo info);
 
@@ -234,6 +235,15 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     VmaAllocationInfo allocationInfo_;
 
     std::vector<VkImageView> imageViews_{1};
+};
+
+class DeviceLocalImageStagingRelease : public SharedObject<DeviceLocalImageStagingRelease> {
+  public:
+    explicit DeviceLocalImageStagingRelease(std::shared_ptr<DeviceLocalImage> image);
+    ~DeviceLocalImageStagingRelease();
+
+  private:
+    std::shared_ptr<DeviceLocalImage> image_;
 };
 
 class Sampler : public SharedObject<Sampler> {

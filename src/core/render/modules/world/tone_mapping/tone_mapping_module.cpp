@@ -237,12 +237,12 @@ void ToneMappingModule::initBuffers() {
     histBuffers_.resize(size);
 
     exposureData_ =
-        vk::DeviceLocalBuffer::create(vma, device, sizeof(ToneMappingModuleExposureData),
+        vk::DeviceLocalBuffer::create(vma, device, false, sizeof(ToneMappingModuleExposureData),
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
     for (int i = 0; i < size; i++) {
         histBuffers_[i] =
-            vk::DeviceLocalBuffer::create(vma, device, histSize * sizeof(uint32_t),
+            vk::DeviceLocalBuffer::create(vma, device, false, histSize * sizeof(uint32_t),
                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         descriptorTables_[i]->bindBuffer(histBuffers_[i], 0, 1);
 

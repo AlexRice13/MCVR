@@ -111,8 +111,12 @@ vk::PhysicalDevice::PhysicalDevice(std::shared_ptr<Instance> instance, std::shar
     findPhysicalDevice();
     findQueueFamilies();
 
+    VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV serProps{};
+    serProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV;
+
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelStructProperties{};
     accelStructProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    accelStructProperties.pNext = &serProps;
 
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties{};
     rayTracingProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
@@ -126,6 +130,7 @@ vk::PhysicalDevice::PhysicalDevice(std::shared_ptr<Instance> instance, std::shar
     properties_ = deviceProps2.properties;
     rayTracingProperties_ = rayTracingProperties;
     accelerationStructProperties_ = accelStructProperties;
+    serProperties_ = serProps;
 }
 
 vk::PhysicalDevice::~PhysicalDevice() {
@@ -237,4 +242,8 @@ VkPhysicalDeviceRayTracingPipelinePropertiesKHR vk::PhysicalDevice::rayTracingPr
 
 VkPhysicalDeviceAccelerationStructurePropertiesKHR vk::PhysicalDevice::accelerationStructProperties() {
     return accelerationStructProperties_;
+}
+
+VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV vk::PhysicalDevice::serProperties() {
+    return serProperties_;
 }

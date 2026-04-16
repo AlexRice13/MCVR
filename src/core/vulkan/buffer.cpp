@@ -266,7 +266,7 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
 }
 
 vk::DeviceLocalBuffer::~DeviceLocalBuffer() {
-    vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    releaseStagingBuffer();
     vmaDestroyBuffer(vma_->allocator(), buffer_, allocation_);
 
 #ifdef DEBUG
@@ -306,7 +306,7 @@ void vk::DeviceLocalBuffer::downloadFromStagingBuffer(void *dest, size_t size, s
     std::memcpy(dest, mappedPtr_, size);
 
     if (!persistStaging_) {
-        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+        releaseStagingBuffer();
         stagingBuffer_ = VK_NULL_HANDLE;
         stagingAllocation_ = VK_NULL_HANDLE;
         mappedPtr_ = nullptr;
@@ -345,7 +345,7 @@ void vk::DeviceLocalBuffer::uploadToStagingBuffer(void *src, size_t size, size_t
     vmaFlushAllocation(vma_->allocator(), stagingAllocation_, offset, size);
 
     if (!persistStaging_) {
-        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+        releaseStagingBuffer();
         stagingBuffer_ = VK_NULL_HANDLE;
         stagingAllocation_ = VK_NULL_HANDLE;
         mappedPtr_ = nullptr;
@@ -355,6 +355,17 @@ void vk::DeviceLocalBuffer::uploadToStagingBuffer(void *src, size_t size, size_t
 void vk::DeviceLocalBuffer::flushStagingBuffer() {
     if (!persistStaging_) { return; }
     vmaFlushAllocation(vma_->allocator(), stagingAllocation_, 0, size_);
+}
+
+void vk::DeviceLocalBuffer::releaseStagingBuffer() {
+    if (stagingBuffer_ != VK_NULL_HANDLE || stagingAllocation_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    }
+
+    stagingBuffer_ = VK_NULL_HANDLE;
+    stagingAllocation_ = VK_NULL_HANDLE;
+    stagingAllocationInfo_ = {};
+    mappedPtr_ = nullptr;
 }
 
 void vk::DeviceLocalBuffer::downloadFromBuffer(VkCommandBuffer cmdBuffer) {
@@ -412,4 +423,11 @@ VkDeviceAddress &vk::DeviceLocalBuffer::bufferAddress() {
         exit(EXIT_FAILURE);
     }
     return bufferAddress_;
+}
+
+vk::DeviceLocalBufferStagingRelease::DeviceLocalBufferStagingRelease(std::shared_ptr<DeviceLocalBuffer> buffer)
+    : buffer_(buffer) {}
+
+vk::DeviceLocalBufferStagingRelease::~DeviceLocalBufferStagingRelease() {
+    if (buffer_ != nullptr) { buffer_->releaseStagingBuffer(); }
 }

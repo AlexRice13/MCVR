@@ -21,6 +21,7 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDeviceProperties properties();
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties();
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructProperties();
+    VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV serProperties();
 
   private:
     std::shared_ptr<Instance> instance_;
@@ -33,5 +34,6 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDeviceProperties properties_;
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties_;
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructProperties_;
+    VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV serProperties_;
 };
 } // namespace vk

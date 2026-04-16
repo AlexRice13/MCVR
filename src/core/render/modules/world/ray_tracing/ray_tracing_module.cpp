@@ -839,6 +839,7 @@ void RayTracingModule::initImages() {
         uploadCmdBuffer->end();
         uploadCmdBuffer->submitMainQueueIndividual(device);
         vkQueueWaitIdle(device->mainVkQueue());
+        noiseTexture3D_->releaseStagingBuffer();
     }
 
     for (int i = 0; i < size; i++) {
@@ -1278,6 +1279,12 @@ void RayTracingModule::initPipeline() {
     if (useSharcRuntime_) {
         queryDefinitions = {{"SHARC_QUERY", "1"}, {"USE_SHARC", "1"}};
         updateDefinitions = {{"SHARC_UPDATE", "1"}, {"USE_SHARC", "1"}};
+    }
+
+    bool useSerRuntime = device->isSerSupported();
+    if (useSerRuntime) {
+        queryDefinitions["USE_SER"] = "1";
+        updateDefinitions["USE_SER"] = "1";
     }
 
     worldRayGenQueryShader_ = loadRuntimeShader(rayGenShaderPath, VK_SHADER_STAGE_RAYGEN_BIT_KHR, queryDefinitions);

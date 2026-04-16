@@ -88,6 +88,7 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
 
     void uploadToBuffer(std::shared_ptr<CommandBuffer> cmdBuffer);
     void uploadToBuffer(std::shared_ptr<CommandBuffer> cmdBuffer, size_t size, size_t srcOffset, size_t dstOffset);
+    void releaseStagingBuffer();
 
     size_t size() override;
     VkBuffer &vkStagingBuffer();
@@ -112,5 +113,14 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     VmaAllocationInfo allocationInfo_;
+};
+
+class DeviceLocalBufferStagingRelease : public SharedObject<DeviceLocalBufferStagingRelease> {
+  public:
+    explicit DeviceLocalBufferStagingRelease(std::shared_ptr<DeviceLocalBuffer> buffer);
+    ~DeviceLocalBufferStagingRelease();
+
+  private:
+    std::shared_ptr<DeviceLocalBuffer> buffer_;
 };
 }; // namespace vk

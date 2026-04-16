@@ -99,6 +99,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         enabledExtensions.push_back(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
     }
 
+    if (supportedExtensions.find(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) != supportedExtensions.end()) {
+        enabledExtensions.push_back(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
+    }
+
     auto areRequiredExtensionsSupported = [&](const std::vector<std::string> &requiredExtensions) {
         for (const auto &requiredExtension : requiredExtensions) {
             if (requiredExtension == "VK_EXT_buffer_device_address") {
@@ -142,8 +146,12 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 #endif
 
     // query supported features
+    VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV supportedSerFeatures{};
+    supportedSerFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+
     VkPhysicalDeviceMaintenance5Features supportedMaintenance5{};
     supportedMaintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES;
+    supportedMaintenance5.pNext = &supportedSerFeatures;
 
     VkPhysicalDeviceCoherentMemoryFeaturesAMD supportedCoherentMemoryFeatures{};
     supportedCoherentMemoryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD;
@@ -194,8 +202,16 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     auto hasExtension = [&](const char *name) { return selectedExtensions.find(name) != selectedExtensions.end(); };
 
     // enabling features
+    VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serFeatures{};
+    serFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+    serFeatures.rayTracingInvocationReorder =
+        hasExtension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) ?
+            supportedSerFeatures.rayTracingInvocationReorder : VK_FALSE;
+    serSupported_ = (serFeatures.rayTracingInvocationReorder == VK_TRUE);
+
     VkPhysicalDeviceMaintenance5Features maintenance5Features{};
     maintenance5Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES;
+    maintenance5Features.pNext = &serFeatures;
     maintenance5Features.maintenance5 =
         hasExtension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME) ? supportedMaintenance5.maintenance5 : VK_FALSE;
 
@@ -399,6 +415,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     deviceCout() << "Logical device created successfully!" << std::endl;
 #endif
 
+    deviceCout() << "Shader Execution Reordering (SER): " << (serSupported_ ? "ENABLED" : "not available") << std::endl;
+
     vkGetDeviceQueue(device_, physicalDevice_->mainQueueIndex(), 0, &mainQueue_);
     vkGetDeviceQueue(device_, physicalDevice_->secondaryQueueIndex(),
                      physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() ? 1 : 0,
@@ -439,4 +457,8 @@ bool vk::Device::isDlssDeviceExtensionsCompatible() const {
 
 bool vk::Device::isXessDeviceExtensionsCompatible() const {
     return xessDeviceExtensionsCompatible_;
+}
+
+bool vk::Device::isSerSupported() const {
+    return serSupported_;
 }

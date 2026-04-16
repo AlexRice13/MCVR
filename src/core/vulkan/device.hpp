@@ -21,6 +21,7 @@ class Device : public SharedObject<Device> {
     bool hasExtendedDynamicState2LogicOp() const;
     bool isDlssDeviceExtensionsCompatible() const;
     bool isXessDeviceExtensionsCompatible() const;
+    bool isSerSupported() const;
 
   private:
     std::shared_ptr<Instance> instance_;
@@ -34,5 +35,6 @@ class Device : public SharedObject<Device> {
     bool extendedDynamicState2LogicOp_ = false;
     bool dlssDeviceExtensionsCompatible_ = false;
     bool xessDeviceExtensionsCompatible_ = false;
+    bool serSupported_ = false;
 };
 }; // namespace vk

@@ -351,6 +351,7 @@ void PostRenderModule::initBuffers() {
     vkSubmitInfo.pSignalSemaphores = nullptr;
     vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
     vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    starFieldVertexBuffer->releaseStagingBuffer();
 }
 
 void PostRenderModule::initRenderPass() {

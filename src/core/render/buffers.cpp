@@ -174,11 +174,13 @@ void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> b
 }
 
 void Buffers::performQueuedUpload() {
-    auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
-    std::shared_ptr<vk::CommandBuffer> cmdBuffer =
-        Renderer::instance().framework()->safeAcquireCurrentContext()->uploadCommandBuffer;
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto frameIndex = context->frameIndex;
+    auto &gc = framework->gc();
+    std::shared_ptr<vk::CommandBuffer> cmdBuffer = context->uploadCommandBuffer;
 
-    auto physicalDevice = Renderer::instance().framework()->physicalDevice();
+    auto physicalDevice = framework->physicalDevice();
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
 
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> uploadPreBufferBarriers, uploadPostBufferBarriers;
@@ -237,7 +239,10 @@ void Buffers::performQueuedUpload() {
         if (size > 0) { buffer->uploadToBuffer(cmdBuffer, size, 0, 0); }
     }
 
-    for (auto buffer : *importantIndexVertexBuffer_) { buffer->uploadToBuffer(cmdBuffer); }
+    for (auto buffer : *importantIndexVertexBuffer_) {
+        buffer->uploadToBuffer(cmdBuffer);
+        gc.collect(vk::DeviceLocalBufferStagingRelease::create(buffer));
+    }
 
     cmdBuffer->barriersBufferImage(uploadPostBufferBarriers, {});
 }

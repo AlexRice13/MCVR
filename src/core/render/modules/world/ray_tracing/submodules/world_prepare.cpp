@@ -48,6 +48,7 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
     auto vma = framework->vma();
     auto device = framework->device();
     auto physicalDevice = framework->physicalDevice();
+    auto &gc = framework->gc();
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto cmdBuffer = context->worldCommandBuffer;
 
@@ -147,6 +148,7 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
     for (auto buffer : rayTracingMetaData) {
         if (buffer == nullptr) continue;
         buffer->uploadToBuffer(cmdBuffer);
+        gc.collect(vk::DeviceLocalBufferStagingRelease::create(buffer));
     }
     cmdBuffer->barriersBufferImage(uploadPostBufferBarriers, {});
 }

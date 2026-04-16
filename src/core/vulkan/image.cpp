@@ -384,7 +384,7 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
 
 vk::DeviceLocalImage::~DeviceLocalImage() {
     for (int i = 0; i < imageViews_.size(); i++) { vkDestroyImageView(device_->vkDevice(), imageViews_[i], nullptr); }
-    vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    releaseStagingBuffer();
     vmaDestroyImage(vma_->allocator(), image_, allocation_);
 
 #ifdef DEBUG
@@ -425,7 +425,7 @@ void vk::DeviceLocalImage::uploadToStagingBuffer(void *src) {
     vmaFlushAllocation(vma_->allocator(), stagingAllocation_, 0, size);
 
     if (!persistStaging_) {
-        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+        releaseStagingBuffer();
         stagingBuffer_ = VK_NULL_HANDLE;
         stagingAllocation_ = VK_NULL_HANDLE;
         mappedPtr_ = nullptr;
@@ -499,6 +499,17 @@ void *vk::DeviceLocalImage::mappedPtr() {
     return mappedPtr_;
 }
 
+void vk::DeviceLocalImage::releaseStagingBuffer() {
+    if (stagingBuffer_ != VK_NULL_HANDLE || stagingAllocation_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    }
+
+    stagingBuffer_ = VK_NULL_HANDLE;
+    stagingAllocation_ = VK_NULL_HANDLE;
+    stagingAllocationInfo_ = {};
+    mappedPtr_ = nullptr;
+}
+
 void vk::DeviceLocalImage::addImageView(VkImageViewCreateInfo info) {
     VkImageView vkImageView{};
     if (vkCreateImageView(device_->vkDevice(), &info, nullptr, &vkImageView) != VK_SUCCESS) {
@@ -506,6 +517,13 @@ void vk::DeviceLocalImage::addImageView(VkImageViewCreateInfo info) {
         exit(EXIT_FAILURE);
     }
     imageViews_.push_back(vkImageView);
+}
+
+vk::DeviceLocalImageStagingRelease::DeviceLocalImageStagingRelease(std::shared_ptr<DeviceLocalImage> image)
+    : image_(image) {}
+
+vk::DeviceLocalImageStagingRelease::~DeviceLocalImageStagingRelease() {
+    if (image_ != nullptr) { image_->releaseStagingBuffer(); }
 }
 
 vk::Sampler::Sampler(std::shared_ptr<Device> device)
