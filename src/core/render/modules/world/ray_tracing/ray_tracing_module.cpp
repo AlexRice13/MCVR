@@ -27,6 +27,8 @@ namespace {
 enum class SerDebugMode {
     Disabled,
     PrimaryOnly,
+    PrimaryAndSecondary,
+    PrimarySecondaryAndSharcUpdate,
     SecondaryOnly,
     SharcUpdateOnly,
 };
@@ -39,6 +41,10 @@ const char *serDebugModeName(SerDebugMode mode) {
             return "disabled";
         case SerDebugMode::PrimaryOnly:
             return "primary_only";
+        case SerDebugMode::PrimaryAndSecondary:
+            return "primary_secondary";
+        case SerDebugMode::PrimarySecondaryAndSharcUpdate:
+            return "primary_secondary_sharc_update";
         case SerDebugMode::SecondaryOnly:
             return "secondary_only";
         case SerDebugMode::SharcUpdateOnly:
@@ -48,11 +54,12 @@ const char *serDebugModeName(SerDebugMode mode) {
 }
 
 bool serUsesQueryShader(SerDebugMode mode) {
-    return mode == SerDebugMode::PrimaryOnly || mode == SerDebugMode::SecondaryOnly;
+    return mode == SerDebugMode::PrimaryOnly || mode == SerDebugMode::PrimaryAndSecondary ||
+           mode == SerDebugMode::PrimarySecondaryAndSharcUpdate || mode == SerDebugMode::SecondaryOnly;
 }
 
 bool serUsesUpdateShader(SerDebugMode mode) {
-    return mode == SerDebugMode::SharcUpdateOnly;
+    return mode == SerDebugMode::PrimarySecondaryAndSharcUpdate || mode == SerDebugMode::SharcUpdateOnly;
 }
 } // namespace
 
@@ -1333,6 +1340,15 @@ void RayTracingModule::initPipeline() {
             break;
         case SerDebugMode::PrimaryOnly:
             queryDefinitions["USE_SER_PRIMARY"] = "1";
+            break;
+        case SerDebugMode::PrimaryAndSecondary:
+            queryDefinitions["USE_SER_PRIMARY"] = "1";
+            queryDefinitions["USE_SER_SECONDARY"] = "1";
+            break;
+        case SerDebugMode::PrimarySecondaryAndSharcUpdate:
+            queryDefinitions["USE_SER_PRIMARY"] = "1";
+            queryDefinitions["USE_SER_SECONDARY"] = "1";
+            updateDefinitions["USE_SER_SHARC_UPDATE"] = "1";
             break;
         case SerDebugMode::SecondaryOnly:
             queryDefinitions["USE_SER_SECONDARY"] = "1";
