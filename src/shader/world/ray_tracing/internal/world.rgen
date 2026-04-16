@@ -359,7 +359,14 @@ void tracePrimary(vec3 eyePos,
         vec3 tracedOrigin = rayState.origin;
         vec3 tracedDirection = rayState.direction;
         mainRay = rayState;
+#if USE_SER
+        hitObjectNV hitObj;
+        hitObjectTraceRayNV(hitObj, topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        reorderThreadNV(hitObj, uint(step), 4);
+        hitObjectExecuteShaderNV(hitObj, 0);
+#else
         traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+#endif
         rayState = mainRay;
 
         if (!surfaceDepthSampled) {
@@ -461,9 +468,10 @@ void traceSecondary(inout MainRay rayState,
         mainRay = rayState;
 #if USE_SER
         hitObjectNV hitObj;
-        hitObjectRecordEmptyNV(hitObj);
         hitObjectTraceRayNV(hitObj, topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, 0.001, mainRay.direction, len, 0);
-        reorderThreadNV(hitObj);
+        // Hint: bounce depth (4 bits) + incoming lobe type (2 bits) for better thread coherence
+        uint serHint = uint(b & 0xF) | (rayLobeType(rayState) << 4);
+        reorderThreadNV(hitObj, serHint, 6);
         hitObjectExecuteShaderNV(hitObj, 0);
 #else
         traceRayEXT(topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, 0.001, mainRay.direction, len, 0);
@@ -553,7 +561,14 @@ void traceSharcUpdate(
 
         vec3 tracedOrigin = mainRay.origin;
         vec3 tracedDirection = mainRay.direction;
+#if USE_SER
+        hitObjectNV hitObj;
+        hitObjectTraceRayNV(hitObj, topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        reorderThreadNV(hitObj, uint(b), 4);
+        hitObjectExecuteShaderNV(hitObj, 0);
+#else
         traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+#endif
 
         if (mainRay.hitT == INF_DISTANCE) {
             SharcUpdateMiss(sharcParameters, sharcState, mainRay.radiance);
