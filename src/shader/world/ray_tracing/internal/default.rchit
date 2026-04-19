@@ -283,7 +283,8 @@ void main() {
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
     applyRainWetness(mat,
                      computeRainWetnessFactor(skyUBO.rainGradient, hasRainExposed(packedData), pc.rainWetnessThreshold));
-    if (hasRainPrecipitationMaterial(packedData)) {
+    bool hasRainGlassMaterial = hasRainAnisotropicMaterial(packedData);
+    if (hasRainGlassMaterial) {
         uint rainSeed = precipitationSeed(worldPos, textureUV, textureID);
         float rainIor = mix(1.16, 1.52, rand(rainSeed));
         float rainF0 = pow((rainIor - 1.0) / max(rainIor + 1.0, 1e-4), 2.0);
@@ -304,7 +305,7 @@ void main() {
     vec3 geoNormal;
     vec3 normal =
         calculateNormal(p0.pos, p1.pos, p2.pos, m0.textureUV, m1.textureUV, m2.textureUV, mat.normal, viewDir, geoNormal);
-    if (hasRainPrecipitationMaterial(packedData)) {
+    if (hasRainGlassMaterial) {
         normal = buildPrecipitationNormal(normal, viewDir, worldPos, textureUV, textureID);
     }
 

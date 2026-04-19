@@ -117,7 +117,7 @@ void main() {
     } else {
         tint += glint;
     }
-    if (hasRainPrecipitationMaterial(packedData)) {
+    if (hasRainAnisotropicMaterial(packedData)) {
         tint = vec3(1.0);
     }
     shadedAlbedo.a = alpha;
