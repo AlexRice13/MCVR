@@ -409,7 +409,6 @@ void NrdModule::initDescriptorTables() {
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
             });
-
             composeDescriptorTables_[i] =
                 set2BindingBuilder.endDescriptorLayoutSetBinding().endDescriptorLayoutSet().build(framework->device());
         }
@@ -766,7 +765,6 @@ void NrdModuleContext::render() {
 
         auto refractionHistoryRadianceImagePrev = module->refractionHistoryRadianceImages_[prevFrameIndex];
         auto refractionHistoryDepthImagePrev = module->refractionHistoryDepthImages_[prevFrameIndex];
-
         composeDescriptorTable->bindImage(refractionHistoryRadianceImagePrev, VK_IMAGE_LAYOUT_GENERAL, 1, 3);
         composeDescriptorTable->bindImage(refractionHistoryDepthImagePrev, VK_IMAGE_LAYOUT_GENERAL, 1, 4);
         composeDescriptorTable->bindImage(refractionHistoryRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 1, 5);

@@ -117,6 +117,9 @@ void main() {
     } else {
         tint += glint;
     }
+    if (hasRainPrecipitationMaterial(packedData)) {
+        tint = vec3(1.0);
+    }
     shadedAlbedo.a = alpha;
 
     LabPBRMat mat = convertLabPBRMaterial(shadedAlbedo, specular, vec4(0.0));

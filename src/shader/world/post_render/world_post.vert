@@ -28,7 +28,7 @@ layout(location = 12) in uint inGlintTexture;
 layout(location = 13) in uint inUseLight;
 layout(location = 14) in ivec2 inLightUV;
 layout(location = 15) in uint inCoordinate;
-layout(location = 16) in vec3 inPostBase;
+layout(location = 16) in vec4 inPostBase;
 
 layout(location = 0) out vec3 outPos;
 layout(location = 1) flat out uint outUseNorm;
@@ -47,9 +47,10 @@ layout(location = 13) flat out uint outUseLight;
 layout(location = 14) flat out ivec2 outLightUV;
 layout(location = 15) out vec4 lightMapColor;
 layout(location = 16) out vec4 overlayColor;
+layout(location = 17) flat out uint outMaterialData;
 
 void main() {
-    vec3 pos = inPos + inPostBase;
+    vec3 pos = inPos + inPostBase.xyz;
     if (inCoordinate == 0) {
         pos = pos - worldUBO.cameraViewMatInv[3].xyz;
     } else if (inCoordinate == 1) {
@@ -76,6 +77,7 @@ void main() {
     outGlintTexture = inGlintTexture;
     outUseLight = inUseLight;
     outLightUV = inLightUV;
+    outMaterialData = floatBitsToUint(inPostBase.w);
 
     gl_Position = worldUBO.cameraProjMat * worldUBO.cameraEffectedViewMat * vec4(pos, 1.0);
 

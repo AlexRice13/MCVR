@@ -7,6 +7,9 @@ const uint useColorLayerBit = 1u << 0u;
 const uint useTextureBit = 1u << 1u;
 const uint useOverlayBit = 1u << 2u;
 const uint useGlintBit = 1u << 3u;
+const uint rainExposedMaterialBit = 1u << 4u;
+const uint rainPrecipitationMaterialBit = 1u << 5u;
+const uint rainSplashMaterialBit = 1u << 6u;
 const uint alphaModeShift = 8u;
 const uint coordinateShift = 12u;
 
@@ -48,6 +51,18 @@ bool hasOverlay(uint packedData) {
 
 bool hasGlint(uint packedData) {
     return (packedData & useGlintBit) != 0u;
+}
+
+bool hasRainExposed(uint packedData) {
+    return (packedData & rainExposedMaterialBit) != 0u;
+}
+
+bool hasRainPrecipitationMaterial(uint packedData) {
+    return (packedData & rainPrecipitationMaterialBit) != 0u;
+}
+
+bool hasRainSplashMaterialPacked(uint packedData) {
+    return (packedData & rainSplashMaterialBit) != 0u;
 }
 
 uint getAlphaMode(uint packedData) {

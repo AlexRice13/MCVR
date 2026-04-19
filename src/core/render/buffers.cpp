@@ -33,6 +33,7 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     textureMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
     lightMapUniformBuffer_.resize(size);
+    localLightBuffer_.resize(size);
     cloudCoverageBuffer_.resize(size);
 
     // Pre-create cloud coverage buffers (zero-filled) so descriptors are always valid
@@ -41,6 +42,11 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     constexpr uint32_t defaultCloudSize = 256 * 256;
     std::vector<uint8_t> zeros(defaultCloudSize, 0);
     for (uint32_t i = 0; i < size; i++) {
+        vk::Data::LocalLightBufferHeader localLightHeader{};
+        localLightBuffer_[i] =
+            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::LocalLightBufferHeader),
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        localLightBuffer_[i]->uploadToBuffer(&localLightHeader, sizeof(localLightHeader), 0);
         cloudCoverageBuffer_[i] =
             vk::HostVisibleBuffer::create(vma, device, defaultCloudSize,
                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -461,6 +467,24 @@ void Buffers::setAndUploadLightMapUniformBuffer(vk::Data::LightMapUBO &ubo) {
     lightMapUniformBuffer_[context->frameIndex]->uploadToBuffer(&ubo);
 }
 
+void Buffers::setAndUploadLocalLightBuffer(uint8_t *data, uint32_t size) {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto vma = framework->vma();
+    auto device = framework->device();
+
+    if (size == 0) { size = sizeof(vk::Data::LocalLightBufferHeader); }
+
+    if (localLightBuffer_[context->frameIndex] == nullptr || localLightBuffer_[context->frameIndex]->size() < size) {
+        localLightBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, size,
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+
+    localLightBuffer_[context->frameIndex]->uploadToBuffer(data, size, 0);
+}
+
 int Buffers::getDrawID() {
     Renderer::instance().framework()->safeAcquireCurrentContext();
 
@@ -551,6 +575,16 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::lightMapUniformBuffer() {
 
     if (lightMapUniformBuffer_[context->frameIndex]) {
         return lightMapUniformBuffer_[context->frameIndex];
+    } else {
+        return nullptr;
+    }
+}
+
+std::shared_ptr<vk::HostVisibleBuffer> Buffers::localLightBuffer() {
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+
+    if (localLightBuffer_[context->frameIndex]) {
+        return localLightBuffer_[context->frameIndex];
     } else {
         return nullptr;
     }

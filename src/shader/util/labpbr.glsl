@@ -107,4 +107,25 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
     return mat;
 }
 
+float computeRainWetnessFactor(float rainGradient, bool rainExposed, float wetnessThreshold) {
+    if (!rainExposed) {
+        return 0.0;
+    }
+    float startThreshold = clamp(wetnessThreshold, 0.0, 1.0);
+    float endThreshold = min(startThreshold + 0.35, 1.0);
+    if (endThreshold <= startThreshold) {
+        endThreshold = min(startThreshold + 0.01, 1.0);
+    }
+    return smoothstep(startThreshold, endThreshold, rainGradient);
+}
+
+void applyRainWetness(inout LabPBRMat mat, float wetness) {
+    if (wetness <= EPS) {
+        return;
+    }
+
+    float wetRoughness = clamp(mat.roughness * 0.28, 0.02, 0.35);
+    mat.roughness = mix(mat.roughness, wetRoughness, wetness);
+}
+
 #endif

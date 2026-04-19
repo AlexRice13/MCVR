@@ -55,6 +55,12 @@ layout(push_constant) uniform PushConstant {
     float basicRadiance;
     uint pbrSamplingMode;
     uint transparentSplitMode;
+    float rainWetnessThreshold;
+    uint volumetricFogEnabled;
+    float volumetricFogStrength;
+    uint volumetricFogSamplingMode;
+    uint transparentRefractionSamplingMode;
+    uint pad1;
 }
 pc;
 

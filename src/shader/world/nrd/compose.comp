@@ -36,6 +36,8 @@ const float kInfDepth = 65504.0;
 const float kMinDiffuseAlbedo = 0.05;
 const float kMinSpecularAlbedo = 0.04;
 const vec3 kUnderwaterColor = vec3(0.0, 0.48, 0.65);
+const float kFogCheckerboardSentinel = -2.0;
+const float kRefractionCheckerboardSentinel = -2.0;
 
 vec3 remodulateDiffuse(vec3 radiance, vec3 albedo) {
     return radiance * max(albedo, vec3(kMinDiffuseAlbedo));
@@ -43,6 +45,79 @@ vec3 remodulateDiffuse(vec3 radiance, vec3 albedo) {
 
 vec3 remodulateSpecular(vec3 radiance, vec3 albedo) {
     return radiance * max(albedo, vec3(kMinSpecularAlbedo));
+}
+
+vec4 reconstructFogData(ivec2 pixel, ivec2 size) {
+    const ivec2 cardinalOffsets[4] =
+        ivec2[](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    const ivec2 diagonalOffsets[4] =
+        ivec2[](ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
+
+    vec3 additive = vec3(0.0);
+    float transmittance = 0.0;
+    int sampleCount = 0;
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 samplePixel = pixel + cardinalOffsets[i];
+        if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= size.x || samplePixel.y >= size.y) { continue; }
+        vec4 sampleFog = imageLoad(fogImage, samplePixel);
+        if (sampleFog.a < 0.0) { continue; }
+        additive += sampleFog.rgb;
+        transmittance += sampleFog.a;
+        sampleCount++;
+    }
+
+    if (sampleCount == 0) {
+        for (int i = 0; i < 4; ++i) {
+            ivec2 samplePixel = pixel + diagonalOffsets[i];
+            if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= size.x || samplePixel.y >= size.y) {
+                continue;
+            }
+            vec4 sampleFog = imageLoad(fogImage, samplePixel);
+            if (sampleFog.a < 0.0) { continue; }
+            additive += sampleFog.rgb;
+            transmittance += sampleFog.a;
+            sampleCount++;
+        }
+    }
+
+    if (sampleCount == 0) { return vec4(0.0, 0.0, 0.0, -1.0); }
+    return vec4(additive / float(sampleCount), transmittance / float(sampleCount));
+}
+
+vec4 reconstructRefractionData(ivec2 pixel, ivec2 size) {
+    const ivec2 cardinalOffsets[4] =
+        ivec2[](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    const ivec2 diagonalOffsets[4] =
+        ivec2[](ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
+
+    vec3 radiance = vec3(0.0);
+    int sampleCount = 0;
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 samplePixel = pixel + cardinalOffsets[i];
+        if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= size.x || samplePixel.y >= size.y) { continue; }
+        vec4 sampleRefraction = imageLoad(refractionRadianceImage, samplePixel);
+        if (sampleRefraction.a <= 0.5) { continue; }
+        radiance += max(sampleRefraction.rgb, vec3(0.0));
+        sampleCount++;
+    }
+
+    if (sampleCount == 0) {
+        for (int i = 0; i < 4; ++i) {
+            ivec2 samplePixel = pixel + diagonalOffsets[i];
+            if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= size.x || samplePixel.y >= size.y) {
+                continue;
+            }
+            vec4 sampleRefraction = imageLoad(refractionRadianceImage, samplePixel);
+            if (sampleRefraction.a <= 0.5) { continue; }
+            radiance += max(sampleRefraction.rgb, vec3(0.0));
+            sampleCount++;
+        }
+    }
+
+    if (sampleCount == 0) { return vec4(0.0, 0.0, 0.0, -1.0); }
+    return vec4(radiance / float(sampleCount), 1.0);
 }
 
 void main() {
@@ -65,13 +140,20 @@ void main() {
     vec4 emission = imageLoad(baseEmissionImage, pixel);
     vec3 emissionRadiance = emission.rgb * emission.a;
     vec4 fogData = imageLoad(fogImage, pixel);
+    if (fogData.a <= kFogCheckerboardSentinel + 0.001) {
+        fogData = reconstructFogData(pixel, size);
+    }
     bool useFogCompose = fogData.a >= 0.0;
     float fogTransmittance = useFogCompose ? clamp(fogData.a, 0.0, 1.0) : 1.0;
     vec3 fogAdditive = useFogCompose ? fogData.rgb : vec3(0.0);
 
     float currDepth = imageLoad(linearDepthImage, pixel).r;
     bool currDepthValid = !(isnan(currDepth) || isinf(currDepth) || currDepth >= kInfDepth * 0.9);
+
     vec4 currRefractionData = imageLoad(refractionRadianceImage, pixel);
+    if (currRefractionData.a <= kRefractionCheckerboardSentinel + 0.001) {
+        currRefractionData = reconstructRefractionData(pixel, size);
+    }
     bool hasCurrentRefraction = currRefractionData.a > 0.5 && clear.a == 0.0 && currDepthValid;
     vec3 refractionRadiance = hasCurrentRefraction ? max(currRefractionData.rgb, vec3(0.0)) : vec3(0.0);
 

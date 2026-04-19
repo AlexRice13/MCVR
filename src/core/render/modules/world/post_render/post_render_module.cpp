@@ -157,14 +157,20 @@ void PostRenderModule::initDescriptorTables() {
                                        .descriptorCount = 1,
                                        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    })
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 2, // first hit depth
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .endDescriptorLayoutSetBinding()
-                                   .endDescriptorLayoutSet()
+                                    .defineDescriptorLayoutSetBinding({
+                                        .binding = 2, // first hit depth
+                                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                        .descriptorCount = 1,
+                                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                                    })
+                                    .defineDescriptorLayoutSetBinding({
+                                        .binding = 3, // scene color
+                                        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                        .descriptorCount = 1,
+                                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                                    })
+                                    .endDescriptorLayoutSetBinding()
+                                    .endDescriptorLayoutSet()
                                    .beginDescriptorLayoutSet() // set 1
                                    .beginDescriptorLayoutSetBinding()
                                    .defineDescriptorLayoutSetBinding({
@@ -189,15 +195,15 @@ void PostRenderModule::initDescriptorTables() {
                                    .endDescriptorLayoutSet()
                                    .beginDescriptorLayoutSet() // set 2
                                    .beginDescriptorLayoutSetBinding()
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 0, // binding 0: mapping
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .endDescriptorLayoutSetBinding()
-                                   .endDescriptorLayoutSet()
-                                   .build(framework->device());
+                                    .defineDescriptorLayoutSetBinding({
+                                        .binding = 0, // binding 0: mapping
+                                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                        .descriptorCount = 1,
+                                        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                    })
+                                    .endDescriptorLayoutSetBinding()
+                                    .endDescriptorLayoutSet()
+                                    .build(framework->device());
 
         samplers_[i] = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
                                            VK_SAMPLER_ADDRESS_MODE_REPEAT);
@@ -220,6 +226,7 @@ void PostRenderModule::initImages() {
         descriptorTables_[i]->bindSamplerImageForShader(samplers_[i], worldLightMapImages_[i], 0, 1);
 
         descriptorTables_[i]->bindImage(firstHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        descriptorTables_[i]->bindSamplerImageForShader(samplers_[i], ldrImages_[i], 0, 3);
 
         worldPostDepthImages_[i] = vk::DeviceLocalImage::create(
             device, vma, false, width_, height_, 1, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -1031,6 +1038,13 @@ void PostRenderModuleContext::render() {
                   VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                   srcStageLight, srcAccessLight);
 
+        VkPipelineStageFlags2 srcStageLdr = 0;
+        VkAccessFlags2 srcAccessLdr = 0;
+        chooseSrc(ldrImage->imageLayout(),
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                  srcStageLdr, srcAccessLdr);
+
         worldCommandBuffer->barriersBufferImage(
             {}, {{
                      .srcStageMask = srcStagePost,
@@ -1057,9 +1071,21 @@ void PostRenderModuleContext::render() {
                      .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
-                     .image = worldLightMapImage,
-                     .subresourceRange = vk::wholeColorSubresourceRange,
-                 }});
+                      .image = worldLightMapImage,
+                      .subresourceRange = vk::wholeColorSubresourceRange,
+                  },
+                  {
+                      .srcStageMask = srcStageLdr,
+                      .srcAccessMask = srcAccessLdr,
+                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                      .oldLayout = ldrImage->imageLayout(),
+                      .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      .srcQueueFamilyIndex = mainQueueIndex,
+                      .dstQueueFamilyIndex = mainQueueIndex,
+                      .image = ldrImage,
+                      .subresourceRange = vk::wholeColorSubresourceRange,
+                  }});
     }
 #ifdef USE_AMD
     postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1067,6 +1093,7 @@ void PostRenderModuleContext::render() {
     postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 #endif
     worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    ldrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->worldPostRenderPass_,

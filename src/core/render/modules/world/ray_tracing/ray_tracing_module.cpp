@@ -33,7 +33,7 @@ enum class SerDebugMode {
     SharcUpdateOnly,
 };
 
-constexpr SerDebugMode kSerDebugMode = SerDebugMode::PrimaryOnly;
+constexpr SerDebugMode kSerDebugMode = SerDebugMode::Disabled;
 
 const char *serDebugModeName(SerDebugMode mode) {
     switch (mode) {
@@ -61,6 +61,10 @@ bool serUsesQueryShader(SerDebugMode mode) {
 bool serUsesUpdateShader(SerDebugMode mode) {
     return mode == SerDebugMode::PrimarySecondaryAndSharcUpdate || mode == SerDebugMode::SharcUpdateOnly;
 }
+
+struct RefractionTemporalPushConstant {
+    uint32_t samplingMode;
+};
 } // namespace
 
 RayTracingModule::RayTracingModule() {}
@@ -85,6 +89,12 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     firstHitBaseEmissionImages_.resize(size);
     fogImages_.resize(size);
     firstHitRefractionImages_.resize(size);
+    fogHistoryImages_.resize(size);
+    fogHistoryDepthImages_.resize(size);
+    fogHistoryLengthImages_.resize(size);
+    refractionHistoryImages_.resize(size);
+    refractionHistoryDepthImages_.resize(size);
+    refractionHistoryLengthImages_.resize(size);
 
     atmosphere_ = Atmosphere::create(framework, shared_from_this());
     worldPrepare_ = WorldPrepare::create(framework, shared_from_this());
@@ -170,6 +180,38 @@ void RayTracingModule::setAttributes(int attributeCount, std::vector<std::string
         }
         return RAY_TRACING_TRANSPARENT_SPLIT_MODE_DETERMINISTIC;
     };
+    auto parseVolumetricFogSamplingMode = [](const std::string &value) -> uint32_t {
+        if (value == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_sampling_mode.checkerboard_half" ||
+            value == "checkerboard_half" || value == "half_res") {
+            return RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_HALF;
+        }
+        if (value == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_sampling_mode.checkerboard_quarter" ||
+            value == "checkerboard_quarter" || value == "quarter_res") {
+            return RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_QUARTER;
+        }
+        if (value == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_sampling_mode.full_res" ||
+            value == "full_res") {
+            return RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_FULL_RES;
+        }
+        return RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_QUARTER;
+    };
+    auto parseTransparentRefractionSamplingMode = [](const std::string &value) -> uint32_t {
+        if (value ==
+                "render_pipeline.module.ray_tracing.attribute.transparent_refraction_sampling_mode.checkerboard_half" ||
+            value == "checkerboard_half" || value == "half_res") {
+            return RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_CHECKERBOARD_HALF;
+        }
+        if (value == "render_pipeline.module.ray_tracing.attribute.transparent_refraction_sampling_mode."
+                     "checkerboard_quarter" ||
+            value == "checkerboard_quarter" || value == "quarter_res") {
+            return RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_CHECKERBOARD_QUARTER;
+        }
+        if (value == "render_pipeline.module.ray_tracing.attribute.transparent_refraction_sampling_mode.full_res" ||
+            value == "full_res") {
+            return RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_FULL_RES;
+        }
+        return RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_CHECKERBOARD_QUARTER;
+    };
     auto parseFloat = [](const std::string &value, float fallback) -> float {
         try {
             return std::stof(value);
@@ -215,6 +257,16 @@ void RayTracingModule::setAttributes(int attributeCount, std::vector<std::string
         } else if (key == "render_pipeline.module.ray_tracing.attribute.basic_radiance") {
             basicRadiance_ =
                 std::max(0.0f, parseFloat(value, basicRadiance_ / basicRadianceScale)) * basicRadianceScale;
+        } else if (key == "render_pipeline.module.ray_tracing.attribute.rain_wetness_threshold") {
+            rainWetnessThreshold_ = std::clamp(parseFloat(value, rainWetnessThreshold_), 0.0f, 1.0f);
+        } else if (key == "render_pipeline.module.ray_tracing.attribute.enable_volumetric_fog") {
+            volumetricFogEnabled_ = parseBool(value);
+        } else if (key == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_strength") {
+            volumetricFogStrength_ = std::max(0.0f, parseFloat(value, volumetricFogStrength_));
+        } else if (key == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_sampling_mode") {
+            volumetricFogSamplingMode_ = parseVolumetricFogSamplingMode(value);
+        } else if (key == "render_pipeline.module.ray_tracing.attribute.transparent_refraction_sampling_mode") {
+            transparentRefractionSamplingMode_ = parseTransparentRefractionSamplingMode(value);
         } else if (key == "render_pipeline.module.ray_tracing.attribute.pbr_sampling_mode") {
             pbrSamplingMode_ = parsePbrSamplingMode(value);
         } else if (key == "render_pipeline.module.ray_tracing.attribute.transparent_split_mode") {
@@ -291,6 +343,8 @@ void RayTracingModule::build() {
     uint32_t size = framework->swapchain()->imageCount();
 
     contexts_.resize(size);
+    lastFogHistoryFrameIndex_ = -1;
+    lastRefractionHistoryFrameIndex_ = -1;
 
     initDescriptorTables();
     initSharc();
@@ -354,6 +408,8 @@ void RayTracingModule::initDescriptorTables() {
 
     uint32_t size = framework->swapchain()->imageCount();
     rayTracingDescriptorTables_.resize(size);
+    fogTemporalDescriptorTables_.resize(size);
+    refractionTemporalDescriptorTables_.resize(size);
 
     for (int i = 0; i < size; i++) {
         rayTracingDescriptorTables_[i] =
@@ -501,6 +557,12 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 4, // binding 4: local light SSBO
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -663,6 +725,179 @@ void RayTracingModule::initDescriptorTables() {
                     .size = sizeof(RayTracingPushConstant),
                 })
                 .build(framework->device());
+
+        fogTemporalDescriptorTables_[i] =
+            vk::DescriptorTableBuilder{}
+                .beginDescriptorLayoutSet() // set 0
+                .beginDescriptorLayoutSetBinding()
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 2,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 3,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 4,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 5,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 6,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 7,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 8,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 9,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .endDescriptorLayoutSetBinding()
+                .endDescriptorLayoutSet()
+                .beginDescriptorLayoutSet() // set 1
+                .beginDescriptorLayoutSetBinding()
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .endDescriptorLayoutSetBinding()
+                .endDescriptorLayoutSet()
+                .build(framework->device());
+
+        refractionTemporalDescriptorTables_[i] =
+            vk::DescriptorTableBuilder{}
+                .beginDescriptorLayoutSet() // set 0
+                .beginDescriptorLayoutSetBinding()
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 2,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 3,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 4,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 5,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 6,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 7,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 8,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 9,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .endDescriptorLayoutSetBinding()
+                .endDescriptorLayoutSet()
+                .beginDescriptorLayoutSet() // set 1
+                .beginDescriptorLayoutSetBinding()
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 0,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                })
+                .endDescriptorLayoutSetBinding()
+                .endDescriptorLayoutSet()
+                .definePushConstant({
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .offset = 0,
+                    .size = sizeof(RefractionTemporalPushConstant),
+                })
+                .build(framework->device());
     }
 }
 
@@ -759,6 +994,8 @@ void RayTracingModule::updateSharcConfig(uint32_t frameIndex) {
 
 void RayTracingModule::initImages() {
     auto framework = framework_.lock();
+    auto device = framework->device();
+    auto vma = framework->vma();
 
     uint32_t size = framework->swapchain()->imageCount();
 
@@ -820,9 +1057,6 @@ void RayTracingModule::initImages() {
             }
         }
 
-        auto device = framework->device();
-        auto vma = framework->vma();
-
         noiseTexture3D_ = vk::DeviceLocalImage::create(
             device, vma, true, 1, noiseRes, noiseRes, noiseRes, 1,
             VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -882,6 +1116,27 @@ void RayTracingModule::initImages() {
         noiseTexture3D_->releaseStagingBuffer();
     }
 
+    for (uint32_t i = 0; i < size; i++) {
+        fogHistoryImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        fogHistoryDepthImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        fogHistoryLengthImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        refractionHistoryImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        refractionHistoryDepthImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        refractionHistoryLengthImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
+
     for (int i = 0; i < size; i++) {
         rayTracingDescriptorTables_[i]->bindSamplerImageForShader(atmosphere_->atmLUTImageSampler_,
                                                                   atmosphere_->atmLUTImage_, 0, 1);
@@ -912,7 +1167,79 @@ void RayTracingModule::initImages() {
         rayTracingDescriptorTables_[i]->bindBuffer(sharcAccumulationBuffer_, 4, 2);
         rayTracingDescriptorTables_[i]->bindBuffer(sharcResolvedBuffer_, 4, 3);
         rayTracingDescriptorTables_[i]->bindBuffer(sharcLockBuffer_, 4, 4);
+
+        const uint32_t fallbackPrevIndex = (i + 1) % size;
+        fogTemporalDescriptorTables_[i]->bindImage(hdrNoisyOutputImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 0);
+        fogTemporalDescriptorTables_[i]->bindImage(fogImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+        fogTemporalDescriptorTables_[i]->bindImage(motionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        fogTemporalDescriptorTables_[i]->bindImage(linearDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 3);
+        fogTemporalDescriptorTables_[i]->bindImage(fogHistoryImages_[fallbackPrevIndex], VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+        fogTemporalDescriptorTables_[i]->bindImage(fogHistoryDepthImages_[fallbackPrevIndex], VK_IMAGE_LAYOUT_GENERAL,
+                                                   0, 5);
+        fogTemporalDescriptorTables_[i]->bindImage(fogHistoryLengthImages_[fallbackPrevIndex],
+                                                   VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+        fogTemporalDescriptorTables_[i]->bindImage(fogHistoryImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 7);
+        fogTemporalDescriptorTables_[i]->bindImage(fogHistoryDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 8);
+        fogTemporalDescriptorTables_[i]->bindImage(fogHistoryLengthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 9);
+
+        refractionTemporalDescriptorTables_[i]->bindImage(hdrNoisyOutputImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 0);
+        refractionTemporalDescriptorTables_[i]->bindImage(firstHitRefractionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+        refractionTemporalDescriptorTables_[i]->bindImage(motionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        refractionTemporalDescriptorTables_[i]->bindImage(linearDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 3);
+        refractionTemporalDescriptorTables_[i]->bindImage(refractionHistoryImages_[fallbackPrevIndex],
+                                                          VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+        refractionTemporalDescriptorTables_[i]->bindImage(refractionHistoryDepthImages_[fallbackPrevIndex],
+                                                          VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        refractionTemporalDescriptorTables_[i]->bindImage(refractionHistoryLengthImages_[fallbackPrevIndex],
+                                                          VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+        refractionTemporalDescriptorTables_[i]->bindImage(refractionHistoryImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 7);
+        refractionTemporalDescriptorTables_[i]->bindImage(refractionHistoryDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0,
+                                                          8);
+        refractionTemporalDescriptorTables_[i]->bindImage(refractionHistoryLengthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0,
+                                                          9);
     }
+
+    auto clearCommandPool = vk::CommandPool::create(framework->physicalDevice(), device);
+    auto clearCommandBuffer = vk::CommandBuffer::create(device, clearCommandPool);
+    clearCommandBuffer->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    auto clearImage = [&](const std::shared_ptr<vk::DeviceLocalImage> &image, const VkClearColorValue &clearValue) {
+        clearCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     .srcAccessMask = 0,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     .oldLayout = image->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .srcQueueFamilyIndex = framework->physicalDevice()->mainQueueIndex(),
+                     .dstQueueFamilyIndex = framework->physicalDevice()->mainQueueIndex(),
+                     .image = image,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        image->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        vkCmdClearColorImage(clearCommandBuffer->vkCommandBuffer(), image->vkImage(), VK_IMAGE_LAYOUT_GENERAL,
+                             &clearValue, 1, &vk::wholeColorSubresourceRange);
+    };
+
+    const VkClearColorValue clearFogHistory = {{0.0f, 0.0f, 0.0f, -1.0f}};
+    const VkClearColorValue clearFogDepth = {{65504.0f, 0.0f, 0.0f, 0.0f}};
+    const VkClearColorValue clearFogLength = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    const VkClearColorValue clearRefractionHistory = {{0.0f, 0.0f, 0.0f, -1.0f}};
+    const VkClearColorValue clearRefractionDepth = {{65504.0f, 0.0f, 0.0f, 0.0f}};
+    const VkClearColorValue clearRefractionLength = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    for (uint32_t i = 0; i < size; ++i) {
+        clearImage(fogHistoryImages_[i], clearFogHistory);
+        clearImage(fogHistoryDepthImages_[i], clearFogDepth);
+        clearImage(fogHistoryLengthImages_[i], clearFogLength);
+        clearImage(refractionHistoryImages_[i], clearRefractionHistory);
+        clearImage(refractionHistoryDepthImages_[i], clearRefractionDepth);
+        clearImage(refractionHistoryLengthImages_[i], clearRefractionLength);
+    }
+
+    clearCommandBuffer->end();
+    clearCommandBuffer->submitMainQueueIndividual(device);
+    vkQueueWaitIdle(device->mainVkQueue());
 }
 
 void RayTracingModule::initPipeline() {
@@ -1440,6 +1767,19 @@ void RayTracingModule::initPipeline() {
         sharcResolveCompShader_ = nullptr;
         sharcResolvePipeline_ = nullptr;
     }
+
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    fogTemporalCompShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/fog_temporal_comp.spv").string());
+    fogTemporalPipeline_ = vk::ComputePipelineBuilder{}
+                              .defineShader(fogTemporalCompShader_)
+                              .definePipelineLayout(fogTemporalDescriptorTables_[0])
+                              .build(device);
+    refractionTemporalCompShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/refraction_temporal_comp.spv").string());
+    refractionTemporalPipeline_ = vk::ComputePipelineBuilder{}
+                                      .defineShader(refractionTemporalCompShader_)
+                                      .definePipelineLayout(refractionTemporalDescriptorTables_[0])
+                                      .build(device);
 }
 
 void RayTracingModule::initSBT() {
@@ -1500,6 +1840,8 @@ void RayTracingModuleContext::render() {
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = rayTracingModule.lock();
+    auto fogTemporalDescriptorTable = module->fogTemporalDescriptorTables_[context->frameIndex];
+    auto refractionTemporalDescriptorTable = module->refractionTemporalDescriptorTables_[context->frameIndex];
 
     rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
     rayTracingDescriptorTable->bindBuffer(worldPrepareContext->blasOffsetsBuffer, 1, 1);
@@ -1520,6 +1862,7 @@ void RayTracingModuleContext::render() {
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
     rayTracingDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
     rayTracingDescriptorTable->bindBuffer(buffers->cloudCoverageBuffer(), 2, 3);
+    rayTracingDescriptorTable->bindBuffer(buffers->localLightBuffer(), 2, 4);
     if (module->useSharcRuntime_) {
         module->updateSharcConfig(context->frameIndex);
         rayTracingDescriptorTable->bindBuffer(module->sharcConfigBuffers_[context->frameIndex], 4, 0);
@@ -1532,6 +1875,12 @@ void RayTracingModuleContext::render() {
         .basicRadiance = module->basicRadiance_,
         .pbrSamplingMode = module->pbrSamplingMode_,
         .transparentSplitMode = module->transparentSplitMode_,
+        .rainWetnessThreshold = module->rainWetnessThreshold_,
+        .volumetricFogEnabled = module->volumetricFogEnabled_ ? 1u : 0u,
+        .volumetricFogStrength = module->volumetricFogStrength_,
+        .volumetricFogSamplingMode = module->volumetricFogSamplingMode_,
+        .transparentRefractionSamplingMode = module->transparentRefractionSamplingMode_,
+        .pad1 = 0u,
     };
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
@@ -1638,4 +1987,140 @@ void RayTracingModuleContext::render() {
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         ->bindRTPipeline(module->rayTracingQueryPipeline_)
         ->raytracing(sharcQuerySbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
+
+    {
+        const uint32_t historyImageCount = static_cast<uint32_t>(module->fogHistoryImages_.size());
+        const uint32_t currentFrameIndex = context->frameIndex;
+        uint32_t prevFrameIndex = (currentFrameIndex + historyImageCount - 1) % historyImageCount;
+        if (module->lastFogHistoryFrameIndex_ >= 0) {
+            prevFrameIndex = static_cast<uint32_t>(module->lastFogHistoryFrameIndex_);
+        }
+        if (prevFrameIndex == currentFrameIndex && historyImageCount > 1) {
+            prevFrameIndex = (currentFrameIndex + 1) % historyImageCount;
+        }
+
+        auto fogHistoryImagePrev = module->fogHistoryImages_[prevFrameIndex];
+        auto fogHistoryDepthImagePrev = module->fogHistoryDepthImages_[prevFrameIndex];
+        auto fogHistoryLengthImagePrev = module->fogHistoryLengthImages_[prevFrameIndex];
+        auto fogHistoryImage = module->fogHistoryImages_[currentFrameIndex];
+        auto fogHistoryDepthImage = module->fogHistoryDepthImages_[currentFrameIndex];
+        auto fogHistoryLengthImage = module->fogHistoryLengthImages_[currentFrameIndex];
+
+        fogTemporalDescriptorTable->bindImage(fogHistoryImagePrev, VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+        fogTemporalDescriptorTable->bindImage(fogHistoryDepthImagePrev, VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        fogTemporalDescriptorTable->bindImage(fogHistoryLengthImagePrev, VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+        fogTemporalDescriptorTable->bindImage(fogHistoryImage, VK_IMAGE_LAYOUT_GENERAL, 0, 7);
+        fogTemporalDescriptorTable->bindImage(fogHistoryDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 8);
+        fogTemporalDescriptorTable->bindImage(fogHistoryLengthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 9);
+        fogTemporalDescriptorTable->bindBuffer(worldBuffer, 1, 0);
+        fogTemporalDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 1, 1);
+
+        std::vector<vk::CommandBuffer::ImageMemoryBarrier> fogTemporalBarriers;
+        auto addFogTemporalBarrier = [&](std::shared_ptr<vk::DeviceLocalImage> &image) {
+            fogTemporalBarriers.push_back({
+                .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                .oldLayout = image->imageLayout(),
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = image,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            });
+            image->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        };
+
+        addFogTemporalBarrier(hdrNoisyOutputImage);
+        addFogTemporalBarrier(fogImage);
+        addFogTemporalBarrier(motionVectorImage);
+        addFogTemporalBarrier(linearDepthImage);
+        addFogTemporalBarrier(fogHistoryImagePrev);
+        addFogTemporalBarrier(fogHistoryDepthImagePrev);
+        addFogTemporalBarrier(fogHistoryLengthImagePrev);
+        addFogTemporalBarrier(fogHistoryImage);
+        addFogTemporalBarrier(fogHistoryDepthImage);
+        addFogTemporalBarrier(fogHistoryLengthImage);
+        worldCommandBuffer->barriersBufferImage({}, fogTemporalBarriers);
+
+        worldCommandBuffer->bindDescriptorTable(fogTemporalDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->fogTemporalPipeline_);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (hdrNoisyOutputImage->width() + 15) / 16,
+                      (hdrNoisyOutputImage->height() + 15) / 16, 1);
+
+        module->lastFogHistoryFrameIndex_ = static_cast<int32_t>(currentFrameIndex);
+    }
+
+    {
+        const uint32_t historyImageCount = static_cast<uint32_t>(module->refractionHistoryImages_.size());
+        const uint32_t currentFrameIndex = context->frameIndex;
+        uint32_t prevFrameIndex = (currentFrameIndex + historyImageCount - 1) % historyImageCount;
+        if (module->lastRefractionHistoryFrameIndex_ >= 0) {
+            prevFrameIndex = static_cast<uint32_t>(module->lastRefractionHistoryFrameIndex_);
+        }
+        if (prevFrameIndex == currentFrameIndex && historyImageCount > 1) {
+            prevFrameIndex = (currentFrameIndex + 1) % historyImageCount;
+        }
+
+        auto refractionHistoryImagePrev = module->refractionHistoryImages_[prevFrameIndex];
+        auto refractionHistoryDepthImagePrev = module->refractionHistoryDepthImages_[prevFrameIndex];
+        auto refractionHistoryLengthImagePrev = module->refractionHistoryLengthImages_[prevFrameIndex];
+        auto refractionHistoryImage = module->refractionHistoryImages_[currentFrameIndex];
+        auto refractionHistoryDepthImage = module->refractionHistoryDepthImages_[currentFrameIndex];
+        auto refractionHistoryLengthImage = module->refractionHistoryLengthImages_[currentFrameIndex];
+
+        refractionTemporalDescriptorTable->bindImage(refractionHistoryImagePrev, VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+        refractionTemporalDescriptorTable->bindImage(refractionHistoryDepthImagePrev, VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        refractionTemporalDescriptorTable->bindImage(refractionHistoryLengthImagePrev, VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+        refractionTemporalDescriptorTable->bindImage(refractionHistoryImage, VK_IMAGE_LAYOUT_GENERAL, 0, 7);
+        refractionTemporalDescriptorTable->bindImage(refractionHistoryDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 8);
+        refractionTemporalDescriptorTable->bindImage(refractionHistoryLengthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 9);
+        refractionTemporalDescriptorTable->bindBuffer(worldBuffer, 1, 0);
+        refractionTemporalDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 1, 1);
+
+        std::vector<vk::CommandBuffer::ImageMemoryBarrier> refractionTemporalBarriers;
+        auto addRefractionTemporalBarrier = [&](std::shared_ptr<vk::DeviceLocalImage> &image) {
+            refractionTemporalBarriers.push_back({
+                .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                .oldLayout = image->imageLayout(),
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = image,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            });
+            image->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        };
+
+        addRefractionTemporalBarrier(hdrNoisyOutputImage);
+        addRefractionTemporalBarrier(firstHitRefractionImage);
+        addRefractionTemporalBarrier(motionVectorImage);
+        addRefractionTemporalBarrier(linearDepthImage);
+        addRefractionTemporalBarrier(refractionHistoryImagePrev);
+        addRefractionTemporalBarrier(refractionHistoryDepthImagePrev);
+        addRefractionTemporalBarrier(refractionHistoryLengthImagePrev);
+        addRefractionTemporalBarrier(refractionHistoryImage);
+        addRefractionTemporalBarrier(refractionHistoryDepthImage);
+        addRefractionTemporalBarrier(refractionHistoryLengthImage);
+        worldCommandBuffer->barriersBufferImage({}, refractionTemporalBarriers);
+
+        worldCommandBuffer->bindDescriptorTable(refractionTemporalDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->refractionTemporalPipeline_);
+        RefractionTemporalPushConstant refractionTemporalPc{
+            .samplingMode = module->transparentRefractionSamplingMode_,
+        };
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), refractionTemporalDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RefractionTemporalPushConstant),
+                           &refractionTemporalPc);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (hdrNoisyOutputImage->width() + 15) / 16,
+                      (hdrNoisyOutputImage->height() + 15) / 16, 1);
+
+        module->lastRefractionHistoryFrameIndex_ = static_cast<int32_t>(currentFrameIndex);
+    }
 }

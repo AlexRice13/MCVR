@@ -341,6 +341,18 @@ namespace Data {
         T_UINT bins[256];
     };
 
+    struct LocalLight {
+        T_VEC4 positionRadius;
+        T_VEC4 colorIntensity;
+    };
+
+    struct LocalLightBufferHeader {
+        T_UINT count;
+        T_UINT maxCount;
+        T_UINT pad0;
+        T_UINT pad1;
+    };
+
     struct LightMapUBO {
         T_FLOAT ambientLightFactor;
         T_FLOAT skyFactor;

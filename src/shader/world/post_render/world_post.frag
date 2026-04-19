@@ -10,10 +10,6 @@ layout(set = 1, binding = 0) uniform WorldUniform {
     WorldUBO worldUBO;
 };
 
-layout(set = 1, binding = 1) uniform SkyUniform {
-    SkyUBO skyUBO;
-};
-
 layout(set = 2, binding = 0) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
@@ -35,6 +31,7 @@ layout(location = 13) flat in uint useLight;
 layout(location = 14) flat in ivec2 lightUV;
 layout(location = 15) in vec4 lightMapColor;
 layout(location = 16) in vec4 overlayColor;
+layout(location = 17) flat in uint materialData;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -58,14 +55,18 @@ void main() {
     if (useColorLayer > 0) { color *= colorLayer; }
     if (useOverlay > 0) { color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a); }
 
+    vec4 litColor;
     if (emission == 0.0) {
-        if (useLight == 0)
-            fragColor = color;
-        else
-            fragColor = color * lightMapColor;
+        if (useLight == 0) {
+            litColor = color;
+        } else {
+            litColor = color * lightMapColor;
+        }
     } else {
-        fragColor = color * emission;
+        litColor = color * emission;
     }
+
+    fragColor = litColor;
 
     float linearDepth = -(mat4(mat3(worldUBO.cameraEffectedViewMat)) * vec4(pos, 1.0)).z;
     gl_FragDepth = clamp(linearDepth / 1000.0, 0.0, 1.0);

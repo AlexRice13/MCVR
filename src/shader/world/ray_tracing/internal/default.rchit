@@ -69,6 +69,12 @@ layout(push_constant) uniform PushConstant {
     float basicRadiance;
     uint pbrSamplingMode;
     uint transparentSplitMode;
+    float rainWetnessThreshold;
+    uint volumetricFogEnabled;
+    float volumetricFogStrength;
+    uint volumetricFogSamplingMode;
+    uint transparentRefractionSamplingMode;
+    uint pad1;
 }
 pc;
 
@@ -137,6 +143,40 @@ bool loadPreviousScenePos(uint geometryBufferIndex, uint primitiveID, vec3 baryC
     mat4 lastModelMat = lastObjToWorldMats.mat[gl_InstanceCustomIndexEXT];
     prevScenePos = mat3(lastModelMat) * prevLocalPos + lastModelMat[3].xyz;
     return true;
+}
+
+uint precipitationSeed(vec3 worldPos, vec2 uv, uint textureID) {
+    return xxhash32(uvec3(floatBitsToUint(worldPos.x * 0.25 + uv.x * 17.0 + float(textureID) * 0.011),
+                          floatBitsToUint(worldPos.y * 0.5 + uv.y * 31.0 + float(textureID) * 0.007),
+                          floatBitsToUint(worldPos.z * 0.25 + uv.x * 13.0 + uv.y * 7.0 +
+                                          float(textureID) * 0.003)));
+}
+
+vec3 buildPrecipitationNormal(vec3 baseNormal, vec3 viewDir, vec3 worldPos, vec2 uv, uint textureID) {
+    vec3 tangent, bitangent;
+    Onb(baseNormal, tangent, bitangent);
+
+    uint seed = precipitationSeed(worldPos, uv, textureID);
+    vec2 centeredUv = uv * 2.0 - 1.0;
+    float crossMask = pow(max(1.0 - abs(centeredUv.x), 0.0), 1.35);
+    float lengthMask = pow(max(1.0 - abs(centeredUv.y), 0.0), 0.45);
+    float dropletMask = max(crossMask * (0.55 + 0.45 * lengthMask), 0.2);
+
+    float swirl = rand(seed) * 2.0 - 1.0;
+    float tilt = rand(seed) * 2.0 - 1.0;
+    float microX = rand(seed) * 2.0 - 1.0;
+    float microY = rand(seed) * 2.0 - 1.0;
+
+    vec2 slope = vec2(centeredUv.x * 1.4 + swirl * 0.5, centeredUv.y * 0.18 + tilt * 0.28);
+    slope += vec2(microX, microY * 0.4) * mix(0.12, 0.55, dropletMask);
+    slope *= mix(0.2, 0.95, dropletMask);
+
+    vec3 perturbed =
+        normalize(tangent * slope.x + bitangent * slope.y + baseNormal * max(0.35, 1.0 - dot(slope, slope) * 0.22));
+    if (dot(perturbed, viewDir) < 0.05) {
+        perturbed = normalize(mix(baseNormal, perturbed, 0.4));
+    }
+    return dot(perturbed, viewDir) > 0.0 ? perturbed : baseNormal;
 }
 
 void main() {
@@ -232,6 +272,22 @@ void main() {
 
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
+    applyRainWetness(mat,
+                     computeRainWetnessFactor(skyUBO.rainGradient, hasRainExposed(packedData), pc.rainWetnessThreshold));
+    if (hasRainPrecipitationMaterial(packedData)) {
+        uint rainSeed = precipitationSeed(worldPos, textureUV, textureID);
+        float rainIor = mix(1.16, 1.52, rand(rainSeed));
+        float rainF0 = pow((rainIor - 1.0) / max(rainIor + 1.0, 1e-4), 2.0);
+        albedoValue.rgb = vec3(1.0);
+        albedoValue.a = max(albedoValue.a, mix(0.12, 0.32, rand(rainSeed)));
+        mat.albedo = vec3(1.0);
+        mat.f0 = vec3(rainF0);
+        mat.roughness = mix(0.004, 0.045, rand(rainSeed));
+        mat.metallic = 0.0;
+        mat.transmission = 1.0;
+        mat.ior = rainIor;
+        mat.emission = 0.0;
+    }
 
     if (!hasPositions) {
         loadTrianglePositions(geometryBufferIndex, i0, i1, i2, p0, p1, p2);
@@ -239,6 +295,9 @@ void main() {
     vec3 geoNormal;
     vec3 normal =
         calculateNormal(p0.pos, p1.pos, p2.pos, m0.textureUV, m1.textureUV, m2.textureUV, mat.normal, viewDir, geoNormal);
+    if (hasRainPrecipitationMaterial(packedData)) {
+        normal = buildPrecipitationNormal(normal, viewDir, worldPos, textureUV, textureID);
+    }
 
     float factor = bounce == 0u ? pc.directLightStrength : pc.indirectLightStrength;
     vec3 emissionRadiance = factor * tint * mat.emission * mainRay.throughput;

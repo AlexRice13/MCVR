@@ -21,6 +21,11 @@ struct Vertex {
     static constexpr uint32_t useTextureBit = 1u << 1u;
     static constexpr uint32_t useOverlayBit = 1u << 2u;
     static constexpr uint32_t useGlintBit = 1u << 3u;
+    static constexpr uint32_t rainExposedMaterialBit = 1u << 4u;
+    static constexpr uint32_t rainPrecipitationMaterialBit = 1u << 5u;
+    static constexpr uint32_t rainSplashMaterialBit = 1u << 6u;
+    static constexpr uint32_t materialFlagMask =
+        rainExposedMaterialBit | rainPrecipitationMaterialBit | rainSplashMaterialBit;
     static constexpr uint32_t alphaModeShift = 8u;
     static constexpr uint32_t coordinateShift = 12u;
 

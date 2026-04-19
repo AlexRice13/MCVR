@@ -74,7 +74,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSdrBrigh
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBuildingBatchSize(
     JNIEnv *, jclass, jint chunkBuildingBatchSize, jboolean write) {
-    Renderer::options.chunkBuildingBatchSize = chunkBuildingBatchSize;
+    Renderer::options.chunkBuildingBatchSize = std::clamp(static_cast<uint32_t>(chunkBuildingBatchSize), 1u, 64u);
     if (write) Renderer::instance().world()->chunks()->resetScheduler();
 }
 

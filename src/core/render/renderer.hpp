@@ -29,7 +29,7 @@ struct Options {
     uint32_t debugMode = 0;
     bool needRecreate = false;
 
-    uint32_t chunkBuildingBatchSize = 2;
+    uint32_t chunkBuildingBatchSize = 32;
     uint32_t chunkBuildingTotalBatches = 4;
 };
 
