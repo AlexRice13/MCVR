@@ -261,6 +261,8 @@ void RayTracingModule::setAttributes(int attributeCount, std::vector<std::string
             rainWetnessThreshold_ = std::clamp(parseFloat(value, rainWetnessThreshold_), 0.0f, 1.0f);
         } else if (key == "render_pipeline.module.ray_tracing.attribute.enable_volumetric_fog") {
             volumetricFogEnabled_ = parseBool(value);
+        } else if (key == "render_pipeline.module.ray_tracing.attribute.disable_volumetric_fog_in_rain") {
+            volumetricFogDisableInRain_ = parseBool(value);
         } else if (key == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_strength") {
             volumetricFogStrength_ = std::max(0.0f, parseFloat(value, volumetricFogStrength_));
         } else if (key == "render_pipeline.module.ray_tracing.attribute.volumetric_fog_sampling_mode") {
@@ -1880,7 +1882,7 @@ void RayTracingModuleContext::render() {
         .volumetricFogStrength = module->volumetricFogStrength_,
         .volumetricFogSamplingMode = module->volumetricFogSamplingMode_,
         .transparentRefractionSamplingMode = module->transparentRefractionSamplingMode_,
-        .pad1 = 0u,
+        .volumetricFogDisableInRain = module->volumetricFogDisableInRain_ ? 1u : 0u,
     };
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |

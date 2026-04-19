@@ -35,7 +35,7 @@ struct RayTracingPushConstant {
     float volumetricFogStrength;
     uint32_t volumetricFogSamplingMode;
     uint32_t transparentRefractionSamplingMode;
-    uint32_t pad1;
+    uint32_t volumetricFogDisableInRain;
 };
 
 enum RayTracingTransparentSplitMode {
@@ -220,6 +220,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     uint32_t transparentSplitMode_ = RAY_TRACING_TRANSPARENT_SPLIT_MODE_DETERMINISTIC;
     float rainWetnessThreshold_ = 0.55f;
     bool volumetricFogEnabled_ = true;
+    bool volumetricFogDisableInRain_ = true;
     float volumetricFogStrength_ = 3.5f;
     uint32_t volumetricFogSamplingMode_ = RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_QUARTER;
     uint32_t transparentRefractionSamplingMode_ =

@@ -173,7 +173,7 @@ layout(push_constant) uniform PushConstant {
     float volumetricFogStrength;
     uint volumetricFogSamplingMode;
     uint transparentRefractionSamplingMode;
-    uint pad1;
+    uint volumetricFogDisableInRain;
 }
 pc;
 
@@ -193,6 +193,15 @@ const float kVolumetricFogBaseDensity = 3.0;
 const float kVolumetricFogDefaultStrength = 3.5;
 const float kFogComposeCheckerboardSentinel = -2.0;
 const float kRefractionCheckerboardSentinel = -2.0;
+
+bool shouldDisableVolumetricFogForRain() {
+    return pc.volumetricFogDisableInRain != 0u && skyUBO.rainGradient > 1e-3;
+}
+
+bool allowVolumetricFog() {
+    return pc.volumetricFogEnabled != 0u && pc.volumetricFogStrength > 1e-3 && skyUBO.hasBlindnessOrDarkness == 0u &&
+           !shouldDisableVolumetricFogForRain();
+}
 
 void applyLegacyFog(vec3 radiance,
                     float t,
@@ -347,10 +356,7 @@ void applySceneFog(vec3 radiance,
                    out vec3 foggedRadiance,
                    out float transmittance,
                    out vec3 additiveRadiance) {
-    bool allowVolumetricFog =
-        pc.volumetricFogEnabled != 0u && pc.volumetricFogStrength > 1e-3 && t > 1e-3 &&
-        skyUBO.hasBlindnessOrDarkness == 0u;
-    if (!allowVolumetricFog) {
+    if (!allowVolumetricFog() || t <= 1e-3) {
         applyLegacyFog(radiance, t, fogStart, dBase, dFog, fogRadiance, foggedRadiance, transmittance, additiveRadiance);
         return;
     }
@@ -1076,7 +1082,7 @@ void main() {
     float transparentFogTransmittance = 1.0;
     vec3 transparentFogAdditive = vec3(0.0);
     bool checkerboardSkipFogCompose = false;
-    if (pc.volumetricFogEnabled != 0u && !useTransparentSplit && skyUBO.hasBlindnessOrDarkness == 0u) {
+    if (allowVolumetricFog() && !useTransparentSplit) {
         checkerboardSkipFogCompose = !shouldTraceSparseSample(pixel, pc.volumetricFogSamplingMode);
     }
     float volumetricPathDistance = surfaceDepth == INF_DISTANCE ? 0.0 : surfaceDepth;
