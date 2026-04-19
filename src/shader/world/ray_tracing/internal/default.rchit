@@ -55,6 +55,15 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
+float directionalLightStrength(vec3 radiance) {
+    return max(radiance.r, max(radiance.g, radiance.b));
+}
+
+vec3 currentDirectionalLightDir() {
+    bool useSun = directionalLightStrength(skyUBO.sunRadiance) >= directionalLightStrength(skyUBO.moonRadiance);
+    return normalize(useSun ? skyUBO.sunDirection : -skyUBO.sunDirection);
+}
+
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
     uint indices[];
 }
@@ -306,8 +315,7 @@ void main() {
 
     bool isOpaqueSurface = mat.transmission <= EPS;
     if (worldUbo.skyType == 1) {
-        vec3 lightDir = normalize(skyUBO.sunDirection);
-        if (lightDir.y < 0.0) { lightDir = -lightDir; }
+        vec3 lightDir = currentDirectionalLightDir();
         vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, 1.0 / max(skyUBO.sunAngularRadius * skyUBO.sunAngularRadius, 1e-6));
         float sampledLightNoL = dot(sampledLightDir, geoNormal);
         if (!isOpaqueSurface || sampledLightNoL > 0.0) {

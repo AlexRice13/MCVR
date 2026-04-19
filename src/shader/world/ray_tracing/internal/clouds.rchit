@@ -71,6 +71,15 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
+float directionalLightStrength(vec3 radiance) {
+    return max(radiance.r, max(radiance.g, radiance.b));
+}
+
+vec3 currentDirectionalLightDir() {
+    bool useSun = directionalLightStrength(skyUBO.sunRadiance) >= directionalLightStrength(skyUBO.moonRadiance);
+    return normalize(useSun ? skyUBO.sunDirection : -skyUBO.sunDirection);
+}
+
 // Cloud coverage SSBO — 256×256 bytes packed as uint32
 layout(std430, set = 2, binding = 3) readonly buffer CloudCoverage {
     uint cells[];
@@ -269,9 +278,7 @@ void main() {
     vec2 windOffset = vec2(skyUBO.cloudWindOffsetX, skyUBO.cloudWindOffsetZ);
 
     // Sun direction
-    vec3 sunDir = normalize(skyUBO.sunDirection);
-    vec3 lightDir = sunDir;
-    if (lightDir.y < 0.0) lightDir = -lightDir;
+    vec3 lightDir = currentDirectionalLightDir();
 
     float lDotW = dot(lightDir, rayDir);
 

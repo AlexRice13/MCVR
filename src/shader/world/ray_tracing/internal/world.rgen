@@ -84,6 +84,22 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
+float directionalLightStrength(vec3 radiance) {
+    return max(radiance.r, max(radiance.g, radiance.b));
+}
+
+bool useSunDirectionalLight() {
+    return directionalLightStrength(skyUBO.sunRadiance) >= directionalLightStrength(skyUBO.moonRadiance);
+}
+
+vec3 activeDirectionalLightDir() {
+    return normalize(useSunDirectionalLight() ? skyUBO.sunDirection : -skyUBO.sunDirection);
+}
+
+vec3 activeDirectionalLightRadiance() {
+    return useSunDirectionalLight() ? skyUBO.sunRadiance : skyUBO.moonRadiance;
+}
+
 layout(set = 2, binding = 4) readonly buffer LocalLightBuffer {
     uint localLightCount;
     uint localLightMaxCount;
@@ -203,7 +219,7 @@ void applyLegacyFog(vec3 radiance,
 }
 
 float fogShadowReference() {
-    vec3 activeLightRadiance = skyUBO.sunDirection.y > 0.0 ? skyUBO.sunRadiance : skyUBO.moonRadiance;
+    vec3 activeLightRadiance = activeDirectionalLightRadiance();
     return max(max(max(activeLightRadiance.r, activeLightRadiance.g), activeLightRadiance.b), 1e-3);
 }
 
@@ -220,8 +236,8 @@ float traceFogVisibility(vec3 origin, vec3 lightDir, float maxDistance) {
 vec3 sampleDirectionalFogLighting(vec3 samplePos, vec3 viewDir, vec3 ambientFogRadiance) {
     if (worldUBO.skyType != 1u) { return ambientFogRadiance * 0.35; }
 
-    vec3 primaryLightDir = skyUBO.sunDirection.y > 0.0 ? normalize(skyUBO.sunDirection) : normalize(-skyUBO.sunDirection);
-    vec3 primaryLightRadiance = skyUBO.sunDirection.y > 0.0 ? skyUBO.sunRadiance : skyUBO.moonRadiance;
+    vec3 primaryLightDir = activeDirectionalLightDir();
+    vec3 primaryLightRadiance = activeDirectionalLightRadiance();
     float visibility = traceFogVisibility(samplePos, primaryLightDir, max(worldUBO.fogEnd, 64.0));
     float cosTheta = clamp(dot(-primaryLightDir, viewDir), -1.0, 1.0);
     float phase = mix(INV_4_PI, radianceHgPhase(cosTheta, 0.2), 0.35);

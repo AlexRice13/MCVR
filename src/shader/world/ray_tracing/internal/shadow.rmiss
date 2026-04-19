@@ -31,9 +31,11 @@ vec3 sampleTransmittance(float r, float mu) {
 
 void main() {
     vec3 toSun = normalize(skyUBO.sunDirection);
+    vec3 rayDir = normalize(gl_WorldRayDirectionEXT);
+    bool traceTowardsSun = dot(rayDir, toSun) >= 0.0;
     vec3 radiance;
 
-    if (toSun.y > 0) {
+    if (traceTowardsSun) {
         vec3 C = vec3(0.0, -skyUBO.Rg, 0.0);
         vec3 pWorld = gl_WorldRayOriginEXT;
         vec3 pPlanet = pWorld - C;

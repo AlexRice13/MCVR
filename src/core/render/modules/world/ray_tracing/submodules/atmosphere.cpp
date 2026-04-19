@@ -5,6 +5,7 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <cmath>
 #include <filesystem>
 
 Atmosphere::Atmosphere() {}
@@ -341,6 +342,9 @@ AtmosphereContext::AtmosphereContext(std::shared_ptr<FrameworkContext> framework
       atmCubeMapFramebuffer(atmosphere->atmCubeMapFramebuffers_[frameworkContext->frameIndex]) {}
 
 void AtmosphereContext::render() {
+    constexpr float kMinecraftDayTicks = 24000.0f;
+    constexpr float kNightStartTick = 12000.0f;
+
     auto buffers = Renderer::instance().buffers();
     auto module = atmosphere.lock();
     if (module == nullptr) { return; }
@@ -348,7 +352,26 @@ void AtmosphereContext::render() {
     auto skyBuffer = buffers->skyUniformBuffer();
     if (skyBuffer == nullptr) { return; }
     auto *skyUbo = reinterpret_cast<vk::Data::SkyUBO *>(skyBuffer->mappedPtr());
-    if (skyUbo != nullptr) { module->applyToSkyUbo(*skyUbo); }
+    if (skyUbo != nullptr) {
+        bool isDaytime = skyUbo->sunDirection.y >= 0.0f;
+        auto worldBuffer = buffers->worldUniformBuffer();
+        if (worldBuffer != nullptr) {
+            auto *worldUbo = reinterpret_cast<vk::Data::WorldUBO *>(worldBuffer->mappedPtr());
+            if (worldUbo != nullptr) {
+                float timeOfDayTicks = std::fmod(std::max(worldUbo->gameTime, 0.0f) * kMinecraftDayTicks,
+                                                 kMinecraftDayTicks);
+                if (timeOfDayTicks < 0.0f) { timeOfDayTicks += kMinecraftDayTicks; }
+                isDaytime = timeOfDayTicks < kNightStartTick;
+            }
+        }
+
+        module->applyToSkyUbo(*skyUbo);
+        if (isDaytime) {
+            skyUbo->moonRadiance = glm::vec3(0.0f);
+        } else {
+            skyUbo->sunRadiance = glm::vec3(0.0f);
+        }
+    }
 
     atmDescriptorTable->bindBuffer(buffers->worldUniformBuffer(), 1, 0);
     atmDescriptorTable->bindBuffer(skyBuffer, 1, 1);
