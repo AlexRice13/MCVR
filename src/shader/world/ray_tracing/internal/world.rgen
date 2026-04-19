@@ -203,9 +203,8 @@ void applyLegacyFog(vec3 radiance,
 }
 
 float fogShadowReference() {
-    float sunRef = max(max(skyUBO.sunRadiance.r, skyUBO.sunRadiance.g), skyUBO.sunRadiance.b);
-    float moonRef = max(max(skyUBO.moonRadiance.r, skyUBO.moonRadiance.g), skyUBO.moonRadiance.b);
-    return max(max(sunRef, moonRef), 1e-3);
+    vec3 activeLightRadiance = skyUBO.sunDirection.y > 0.0 ? skyUBO.sunRadiance : skyUBO.moonRadiance;
+    return max(max(max(activeLightRadiance.r, activeLightRadiance.g), activeLightRadiance.b), 1e-3);
 }
 
 float traceFogVisibility(vec3 origin, vec3 lightDir, float maxDistance) {
