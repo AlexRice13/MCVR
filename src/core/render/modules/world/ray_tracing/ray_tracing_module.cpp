@@ -92,6 +92,7 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     fogHistoryImages_.resize(size);
     fogHistoryDepthImages_.resize(size);
     fogHistoryLengthImages_.resize(size);
+    localFogReservoirImages_.resize(size);
     refractionHistoryImages_.resize(size);
     refractionHistoryDepthImages_.resize(size);
     refractionHistoryLengthImages_.resize(size);
@@ -683,6 +684,18 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 15, // binding 15: localFogReservoirImagePrev (Phase 4)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 16, // binding 16: localFogReservoirImage      (Phase 4)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .beginDescriptorLayoutSet() // set 4
@@ -1128,6 +1141,12 @@ void RayTracingModule::initImages() {
         fogHistoryLengthImages_[i] = vk::DeviceLocalImage::create(
             device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
             VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        // Phase 4: temporal local-fog reservoir image (R32G32B32A32_SFLOAT).
+        // R = pickedLightIdx (encoded float, -1.0 = empty),
+        // G = sumWeights, B = M (effective sample count), A = pickedTargetPdf.
+        localFogReservoirImages_[i] = vk::DeviceLocalImage::create(
+            device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
+            VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         refractionHistoryImages_[i] = vk::DeviceLocalImage::create(
             device, vma, false, hdrNoisyOutputImages_[i]->width(), hdrNoisyOutputImages_[i]->height(), 1,
             VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -1163,6 +1182,14 @@ void RayTracingModule::initImages() {
         rayTracingDescriptorTables_[i]->bindImage(firstHitBaseEmissionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 12);
         rayTracingDescriptorTables_[i]->bindImage(fogImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 13);
         rayTracingDescriptorTables_[i]->bindImage(firstHitRefractionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+        // Phase 4: bind static fallback for prev/curr local-fog reservoir; render() rebinds
+        // prev to lastFogHistoryFrameIndex_ each frame for correct temporal ping-pong.
+        {
+            const uint32_t fallbackPrevReservoirIdx = (i + 1) % size;
+            rayTracingDescriptorTables_[i]->bindImage(localFogReservoirImages_[fallbackPrevReservoirIdx],
+                                                      VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+            rayTracingDescriptorTables_[i]->bindImage(localFogReservoirImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 16);
+        }
 
         rayTracingDescriptorTables_[i]->bindBuffer(sharcConfigBuffers_[i], 4, 0);
         rayTracingDescriptorTables_[i]->bindBuffer(sharcHashEntriesBuffer_, 4, 1);
@@ -1227,6 +1254,8 @@ void RayTracingModule::initImages() {
     const VkClearColorValue clearFogHistory = {{0.0f, 0.0f, 0.0f, -1.0f}};
     const VkClearColorValue clearFogDepth = {{65504.0f, 0.0f, 0.0f, 0.0f}};
     const VkClearColorValue clearFogLength = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    // Phase 4: empty reservoir sentinel (-1 light index, zero stats).
+    const VkClearColorValue clearLocalFogReservoir = {{-1.0f, 0.0f, 0.0f, 0.0f}};
     const VkClearColorValue clearRefractionHistory = {{0.0f, 0.0f, 0.0f, -1.0f}};
     const VkClearColorValue clearRefractionDepth = {{65504.0f, 0.0f, 0.0f, 0.0f}};
     const VkClearColorValue clearRefractionLength = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -1234,6 +1263,7 @@ void RayTracingModule::initImages() {
         clearImage(fogHistoryImages_[i], clearFogHistory);
         clearImage(fogHistoryDepthImages_[i], clearFogDepth);
         clearImage(fogHistoryLengthImages_[i], clearFogLength);
+        clearImage(localFogReservoirImages_[i], clearLocalFogReservoir);
         clearImage(refractionHistoryImages_[i], clearRefractionHistory);
         clearImage(refractionHistoryDepthImages_[i], clearRefractionDepth);
         clearImage(refractionHistoryLengthImages_[i], clearRefractionLength);
@@ -1939,6 +1969,30 @@ void RayTracingModuleContext::render() {
     addBarrier(fogImage, VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(firstHitRefractionImage, VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(atmosphereContext->atmCubeMapImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Phase 4: per-frame rebind of the local-fog reservoir prev/curr images so the rgen
+    // reads the correct ping-pong slot. We piggy-back on lastFogHistoryFrameIndex_
+    // because the fog history images and the reservoir image must stay frame-locked
+    // (they describe the same dominant march step on the same frame).
+    {
+        const uint32_t reservoirImageCount = static_cast<uint32_t>(module->localFogReservoirImages_.size());
+        const uint32_t reservoirCurrIdx = context->frameIndex;
+        uint32_t reservoirPrevIdx = (reservoirCurrIdx + reservoirImageCount - 1) % reservoirImageCount;
+        if (module->lastFogHistoryFrameIndex_ >= 0) {
+            reservoirPrevIdx = static_cast<uint32_t>(module->lastFogHistoryFrameIndex_);
+        }
+        if (reservoirPrevIdx == reservoirCurrIdx && reservoirImageCount > 1) {
+            reservoirPrevIdx = (reservoirCurrIdx + 1) % reservoirImageCount;
+        }
+        auto reservoirPrev = module->localFogReservoirImages_[reservoirPrevIdx];
+        auto reservoirCurr = module->localFogReservoirImages_[reservoirCurrIdx];
+
+        rayTracingDescriptorTable->bindImage(reservoirPrev, VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+        rayTracingDescriptorTable->bindImage(reservoirCurr, VK_IMAGE_LAYOUT_GENERAL, 3, 16);
+
+        addBarrier(reservoirPrev, VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(reservoirCurr, VK_IMAGE_LAYOUT_GENERAL);
+    }
 
     if (!barriers.empty()) { worldCommandBuffer->barriersBufferImage({}, barriers); }
 

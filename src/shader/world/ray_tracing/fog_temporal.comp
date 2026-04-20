@@ -26,10 +26,24 @@ layout(set = 1, binding = 1) uniform LastWorldUniform {
 const float kFogCheckerboardSentinel = -2.0;
 const float kInfDepth = 65504.0;
 const float kFogTemporalDepthThreshold = 0.15;
-const float kFogTemporalMinAlpha = 0.06;
-const float kFogTemporalMinAlphaReconstructed = 0.12;
-const float kFogTemporalMaxHistory = 32.0;
-const float kFogTemporalMaxHistoryReconstructed = 12.0;
+// Lowered floor alphas paired with the variance-aware history clamp above:
+// the clamp now widens with local noise, so we can safely accumulate far more frames
+// without trailing artifacts. Effective max history ≈ 1 / minAlpha.
+//
+// Phase 3: split the alpha into two streams. The *additive* RGB channel (which
+// carries local-light + path-light fog and dominates Nether/lava flicker) gets a
+// much stiffer history (3-4× longer), because the WRS+visibility binary noise
+// in there benefits enormously from long temporal averaging. The *transmittance*
+// alpha (A channel) stays looser to react quickly to depth/occlusion changes.
+const float kFogTemporalMinAlpha = 0.02;
+const float kFogTemporalMinAlphaReconstructed = 0.05;
+const float kFogTemporalMaxHistory = 64.0;
+const float kFogTemporalMaxHistoryReconstructed = 24.0;
+
+const float kFogTemporalAdditiveMinAlpha = 0.004;            // ~250 frames history for RGB
+const float kFogTemporalAdditiveMinAlphaReconstructed = 0.015;
+const float kFogTemporalAdditiveMaxHistory = 256.0;
+const float kFogTemporalAdditiveMaxHistoryReconstructed = 64.0;
 
 bool inBounds(ivec2 pixel, ivec2 size) {
     return pixel.x >= 0 && pixel.y >= 0 && pixel.x < size.x && pixel.y < size.y;
@@ -76,23 +90,50 @@ vec4 reconstructFogData(ivec2 pixel, ivec2 size) {
 }
 
 vec4 clampFogHistory(ivec2 pixel, ivec2 size, vec4 historyFog, vec4 currentFog) {
-    vec4 minFog = currentFog;
-    vec4 maxFog = currentFog;
+    // Variance-aware AABB: instead of a hard min/max box (which over-clamps under
+    // single-sample noise), build mean/variance from the 3×3 neighborhood and clamp
+    // against mean ± k·sigma. This widens the acceptance window proportional to local
+    // noise — sharp emissive regions stay temporally stable, soft regions still snap.
+    //
+    // Phase 3: use a tighter k (1.5 instead of 2.0) for the RGB additive channels and
+    // keep 2.0 for the transmittance — together with the much longer additive history
+    // (kFogTemporalAdditiveMaxHistory=192), this gives strong rejection of single-frame
+    // local-light fireflies while still allowing legitimate emissive radiance to
+    // converge over a few frames.
+    vec4 m1 = currentFog;
+    vec4 m2 = currentFog * currentFog;
+    int n = 1;
 
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) { continue; }
             ivec2 samplePixel = pixel + ivec2(x, y);
             if (!inBounds(samplePixel, size)) { continue; }
 
             vec4 sampleFog = imageLoad(fogImage, samplePixel);
             if (sampleFog.a <= kFogCheckerboardSentinel + 0.001 || sampleFog.a < 0.0) { continue; }
 
-            minFog = min(minFog, sampleFog);
-            maxFog = max(maxFog, sampleFog);
+            m1 += sampleFog;
+            m2 += sampleFog * sampleFog;
+            n++;
         }
     }
 
-    return clamp(historyFog, minFog, maxFog);
+    vec4 mean = m1 / float(n);
+    vec4 variance = max(m2 / float(n) - mean * mean, vec4(0.0));
+    vec4 sigma = sqrt(variance);
+
+    // Phase 4 follow-up: relaxed RGB clamp from 1.5 → 1.8 σ. Once the per-pixel
+    // local-fog reservoir was cleaned up, the additive RGB neighborhood variance
+    // dropped significantly — making the old 1.5σ window so tight that legitimate
+    // single-frame sun-shaft visibility variance (binary shadow ray, 1 spp/step)
+    // got clamped out of the history, preventing temporal accumulation. 1.8σ keeps
+    // dense-emitter firefly rejection essentially intact while letting sun shafts
+    // converge over the long (192-frame) additive history again.
+    const vec4 kVarianceClampK = vec4(1.8, 1.8, 1.8, 2.0); // tighter on RGB, looser on A
+    vec4 lo = mean - sigma * kVarianceClampK;
+    vec4 hi = mean + sigma * kVarianceClampK;
+    return clamp(historyFog, lo, hi);
 }
 
 bool bilinearReprojectFog(vec2 prevPixel, ivec2 size, float currDepth, out vec4 historyFog, out float historyLength) {
@@ -181,12 +222,28 @@ void main() {
 
         if (hasReprojectedFog) {
             reprojectedFogData = clampFogHistory(pixel, size, reprojectedFogData, currentFogData);
-            float maxHistory = fogWasCheckerboardSkipped ? kFogTemporalMaxHistoryReconstructed : kFogTemporalMaxHistory;
-            historyLength = min(reprojectedHistoryLength + 1.0, maxHistory);
-            float minAlpha =
-                fogWasCheckerboardSkipped ? kFogTemporalMinAlphaReconstructed : kFogTemporalMinAlpha;
-            float alpha = max(1.0 / max(historyLength, 1.0), minAlpha);
-            resolvedFogData = mix(reprojectedFogData, currentFogData, alpha);
+
+            // Phase 3 dual-stream blend: stiff alpha on RGB (additive radiance) so that
+            // dense-emitter binary-visibility noise smooths out over hundreds of frames,
+            // looser alpha on A (transmittance) so it tracks geometry/depth promptly.
+            float maxHistoryA = fogWasCheckerboardSkipped ?
+                                    kFogTemporalMaxHistoryReconstructed : kFogTemporalMaxHistory;
+            float maxHistoryRGB = fogWasCheckerboardSkipped ?
+                                    kFogTemporalAdditiveMaxHistoryReconstructed :
+                                    kFogTemporalAdditiveMaxHistory;
+            historyLength = min(reprojectedHistoryLength + 1.0, maxHistoryA);
+            float historyLengthRGB = min(reprojectedHistoryLength + 1.0, maxHistoryRGB);
+
+            float minAlphaA = fogWasCheckerboardSkipped ?
+                                  kFogTemporalMinAlphaReconstructed : kFogTemporalMinAlpha;
+            float minAlphaRGB = fogWasCheckerboardSkipped ?
+                                    kFogTemporalAdditiveMinAlphaReconstructed :
+                                    kFogTemporalAdditiveMinAlpha;
+            float alphaA   = max(1.0 / max(historyLength, 1.0), minAlphaA);
+            float alphaRGB = max(1.0 / max(historyLengthRGB, 1.0), minAlphaRGB);
+
+            resolvedFogData.rgb = mix(reprojectedFogData.rgb, currentFogData.rgb, alphaRGB);
+            resolvedFogData.a   = mix(reprojectedFogData.a,   currentFogData.a,   alphaA);
         }
     } else if (fogWasCheckerboardSkipped && hasReprojectedFog) {
         resolvedFogData = vec4(max(reprojectedFogData.rgb, vec3(0.0)), clamp(reprojectedFogData.a, 0.0, 1.0));

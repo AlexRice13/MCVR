@@ -252,6 +252,13 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> fogHistoryImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> fogHistoryDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> fogHistoryLengthImages_;
+    // Phase 4: per-pixel temporal reservoir for the volumetric local-light WRS in the
+    // rgen. Encodes the picked light at the dominant march step plus its sumW/M/tPdf
+    // so the next frame can merge it with that frame's fresh WRS reservoir, dramatically
+    // reducing inter-frame "which light got picked × visibility" variance for dense
+    // emitter scenes (Nether lava, glowstone). Format: RGBA32F, ping-pong via the
+    // existing lastFogHistoryFrameIndex_ index.
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> localFogReservoirImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> refractionHistoryImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> refractionHistoryDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> refractionHistoryLengthImages_;

@@ -26,6 +26,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     std::vector<const char *> enabledExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_SPIRV_1_4_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
@@ -190,9 +191,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     supportedRayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
     supportedRayTracingFeatures.pNext = &supportedAccelerationStructureFeatures;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQueryFeatures{};
+    supportedRayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    supportedRayQueryFeatures.pNext = &supportedRayTracingFeatures;
+
     VkPhysicalDeviceFeatures2 supportedFeatures2{};
     supportedFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    supportedFeatures2.pNext = &supportedRayTracingFeatures;
+    supportedFeatures2.pNext = &supportedRayQueryFeatures;
 
     vkGetPhysicalDeviceFeatures2(physicalDevice_->vkPhysicalDevice(), &supportedFeatures2);
 
@@ -332,6 +337,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         rayTracingFeatures.rayTracingPipeline = supportedRayTracingFeatures.rayTracingPipeline;
     }
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.pNext = &rayTracingFeatures;
+    if (hasExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
+        rayQueryFeatures.rayQuery = supportedRayQueryFeatures.rayQuery;
+    }
+
     VkPhysicalDeviceFeatures features = {};
     features.shaderClipDistance = supportedFeatures2.features.shaderClipDistance;
     features.shaderCullDistance = supportedFeatures2.features.shaderCullDistance;
@@ -346,7 +358,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &rayTracingFeatures;
+    features2.pNext = &rayQueryFeatures;
     features2.features = features;
 
 #ifdef MCVR_ENABLE_XESS

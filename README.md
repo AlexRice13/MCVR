@@ -41,3 +41,20 @@ cmake --build build -j --config Release
 cmake --install build --config Release
 ```
 
+# Fork Status
+
+## Implemented / actively used in this fork
+
+1. Sun-elevation-based celestial light gating
+2. Volumetric clouds and cloud shadows
+3. Ray-traced rain droplets
+4. Ray-traced volumetric fog
+5. HDR
+
+## Not successfully implemented
+
+1. SER (Shader Execution Reordering): multiple attempts were made, including enabling primary-hit SER and fallback experiments, but stability issues and random all-zero returns prevented it from becoming a shippable feature in this fork.
+
+## Statement
+
+All changes currently carried by this fork were produced through a GitHub Copilot vibe-coding workflow, including exploration, implementation, debugging, rollback, and final integration.
