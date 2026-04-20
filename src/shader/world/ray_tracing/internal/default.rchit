@@ -240,6 +240,7 @@ void main() {
 
         albedoValue = sampleTexture(textures[nonuniformEXT(textureID)], textureUV, lod, false);
         albedoValue.a = resolveSurfaceAlpha(albedoValue.a * colorLayerValue.a, alphaMode);
+        albedoValue.a = adjustWaterOpacityForSubmersion(albedoValue.a, packedData, skyUBO.cameraSubmersionType);
         specularValue = textureMap.specular >= 0 ?
                             sampleTexture(textures[nonuniformEXT(textureMap.specular)], textureUV, lod, false) :
                             vec4(0.0);

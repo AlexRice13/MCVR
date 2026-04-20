@@ -10,6 +10,7 @@ const uint useGlintBit = 1u << 3u;
 const uint rainExposedMaterialBit = 1u << 4u;
 const uint rainPrecipitationMaterialBit = 1u << 5u;
 const uint rainSplashMaterialBit = 1u << 6u;
+const uint waterMaterialBit = 1u << 7u;
 const uint alphaModeShift = 8u;
 const uint coordinateShift = 12u;
 
@@ -63,6 +64,10 @@ bool hasRainPrecipitationMaterial(uint packedData) {
 
 bool hasRainSplashMaterialPacked(uint packedData) {
     return (packedData & rainSplashMaterialBit) != 0u;
+}
+
+bool hasWaterMaterialPacked(uint packedData) {
+    return (packedData & waterMaterialBit) != 0u;
 }
 
 uint getAlphaMode(uint packedData) {

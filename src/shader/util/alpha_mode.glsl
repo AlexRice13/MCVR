@@ -7,6 +7,7 @@ const uint ALPHA_MODE_TRANSPARENT = 2u;
 const uint MATERIAL_FLAG_RAIN_EXPOSED = 1u << 4u;
 const uint MATERIAL_FLAG_RAIN_PRECIPITATION = 1u << 5u;
 const uint MATERIAL_FLAG_RAIN_SPLASH = 1u << 6u;
+const uint MATERIAL_FLAG_WATER = 1u << 7u;
 
 const float CUTOUT_ALPHA_THRESHOLD = 0.5;
 
@@ -31,6 +32,10 @@ bool hasRainAnisotropicMaterial(uint encodedMaterialData) {
         || hasRainSplashMaterial(encodedMaterialData);
 }
 
+bool hasWaterMaterial(uint encodedMaterialData) {
+    return (encodedMaterialData & MATERIAL_FLAG_WATER) != 0u;
+}
+
 float resolveSurfaceAlpha(float alpha, uint alphaMode) {
     alpha = clamp(alpha, 0.0, 1.0);
 
@@ -43,6 +48,13 @@ float resolveSurfaceAlpha(float alpha, uint alphaMode) {
     }
 
     return 1.0;
+}
+
+float adjustWaterOpacityForSubmersion(float alpha, uint encodedMaterialData, uint cameraSubmersionType) {
+    if (cameraSubmersionType == 1u && hasWaterMaterial(encodedMaterialData)) {
+        return alpha * 0.5;
+    }
+    return alpha;
 }
 
 #endif

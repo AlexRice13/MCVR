@@ -54,6 +54,7 @@
 #include "util/random.glsl"
 #include "util/ray_cone.glsl"
 #include "util/ray.glsl"
+#include "util/restir.glsl"
 #include "util/util.glsl"
 #include "util/volumetric_fog.glsl"
 #if USE_SHARC
@@ -262,38 +263,12 @@ vec3 sampleDirectionalFogLighting(vec3 samplePos, vec3 viewDir, vec3 ambientFogR
 }
 
 // Phase 4: per-pixel temporal reservoir for the local-light WRS.
-struct LocalFogReservoir {
-    int   pickedIdx;         // -1 if empty
-    float sumW;
-    float M;
-    float pickedTargetPdf;
-};
-
-LocalFogReservoir emptyLocalFogReservoir() {
-    LocalFogReservoir r;
-    r.pickedIdx       = -1;
-    r.sumW            = 0.0;
-    r.M               = 0.0;
-    r.pickedTargetPdf = 0.0;
-    return r;
+RestirReservoir loadLocalFogReservoir(ivec2 pixel) {
+    return restirReservoirFromRaw(imageLoad(localFogReservoirImagePrev, pixel));
 }
 
-LocalFogReservoir loadLocalFogReservoir(ivec2 pixel) {
-    vec4 raw = imageLoad(localFogReservoirImagePrev, pixel);
-    LocalFogReservoir r;
-    r.pickedIdx       = int(floor(raw.r + 0.5));
-    r.sumW            = raw.g;
-    r.M               = raw.b;
-    r.pickedTargetPdf = raw.a;
-    if (isnan(r.sumW) || isinf(r.sumW) || r.sumW < 0.0)              { r = emptyLocalFogReservoir(); }
-    if (isnan(r.pickedTargetPdf) || isinf(r.pickedTargetPdf))        { r = emptyLocalFogReservoir(); }
-    if (r.pickedIdx < 0)                                              { r = emptyLocalFogReservoir(); }
-    return r;
-}
-
-void storeLocalFogReservoir(ivec2 pixel, LocalFogReservoir r) {
-    imageStore(localFogReservoirImage, pixel,
-               vec4(float(r.pickedIdx), r.sumW, r.M, r.pickedTargetPdf));
+void storeLocalFogReservoir(ivec2 pixel, RestirReservoir r) {
+    imageStore(localFogReservoirImage, pixel, restirReservoirToRaw(r));
 }
 
 // Compute the unshadowed contribution + targetPdf for a specific light at samplePos.
@@ -319,10 +294,10 @@ bool evaluateLocalLight(uint lightIdx, vec3 samplePos, vec3 viewDir,
 }
 
 vec3 sampleLocalFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed,
-                            inout LocalFogReservoir reservoir, bool mergePrev,
-                            LocalFogReservoir prevReservoir) {
+                            inout RestirReservoir reservoir, bool mergePrev,
+                            RestirReservoir prevReservoir) {
     vec3 lighting = vec3(0.0);
-    reservoir = emptyLocalFogReservoir();
+    reservoir = restirEmptyReservoir();
     uint lightCount = min(localLightCount, 16u);
     if (lightCount == 0u) { return lighting; }
 
@@ -338,12 +313,7 @@ vec3 sampleLocalFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed,
         float dist;
         if (!evaluateLocalLight(i, samplePos, viewDir, unshadowed, targetPdf, dirToLight, dist)) { continue; }
 
-        reservoir.sumW += targetPdf;
-        reservoir.M    += 1.0;
-
-        if (rand(rngSeed) * reservoir.sumW < targetPdf) {
-            reservoir.pickedIdx       = int(i);
-            reservoir.pickedTargetPdf = targetPdf;
+        if (restirReservoirAddCandidate(reservoir, int(i), targetPdf, rngSeed)) {
             pickedContribution        = unshadowed;
             pickedDir                 = dirToLight;
             pickedDist                = dist;
@@ -356,8 +326,7 @@ vec3 sampleLocalFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed,
     // targetPdf recomputed at the current samplePos so the W reweight is correct even
     // if the camera/lights moved slightly. This dramatically reduces "which light got
     // picked × visibility" variance — the principal residual flicker source after Phase 3.
-    if (mergePrev && prevReservoir.pickedIdx >= 0 && prevReservoir.pickedIdx < int(lightCount) &&
-        prevReservoir.M > 0.0 && prevReservoir.pickedTargetPdf > 1e-6 && prevReservoir.sumW > 0.0)
+    if (mergePrev && restirIsValidReservoir(prevReservoir) && prevReservoir.pickedIdx < int(lightCount))
     {
         vec3 unshadowedP;
         float targetPdfP;
@@ -372,20 +341,13 @@ vec3 sampleLocalFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed,
             // and freezing the pixel onto the picked-light's per-frame visibility
             // noise (the "sticky on-screen noise" failure mode).
             const float kReservoirMMax = 20.0;
-            float prevMCapped = min(prevReservoir.M, kReservoirMMax);
-            float mScale      = prevMCapped / max(prevReservoir.M, 1.0);
-            float prevSumWCapped = prevReservoir.sumW * mScale;
+            RestirReservoir cappedPrevReservoir = restirCapReservoirM(prevReservoir, kReservoirMMax);
 
             // Re-weight prev's (capped) accumulated weight by current/previous targetPdf ratio.
-            float ratio   = clamp(targetPdfP / max(prevReservoir.pickedTargetPdf, 1e-6), 0.0, 4.0);
-            float reWeight = prevSumWCapped * ratio;
+            float reWeight = restirTemporalReweight(cappedPrevReservoir, targetPdfP, 4.0);
 
-            reservoir.sumW += reWeight;
-            reservoir.M     = reservoir.M + prevMCapped;
-
-            if (rand(rngSeed) * reservoir.sumW < reWeight) {
-                reservoir.pickedIdx       = prevReservoir.pickedIdx;
-                reservoir.pickedTargetPdf = targetPdfP;
+            if (restirReservoirMergeCandidate(reservoir, cappedPrevReservoir.pickedIdx, targetPdfP,
+                                              reWeight, cappedPrevReservoir.M, rngSeed)) {
                 pickedContribution        = unshadowedP;
                 pickedDir                 = dirP;
                 pickedDist                = distP;
@@ -393,16 +355,14 @@ vec3 sampleLocalFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed,
         }
     }
 
-    if (reservoir.pickedIdx < 0 || reservoir.sumW <= 0.0 || reservoir.pickedTargetPdf <= 1e-6) {
+    if (!restirIsValidReservoir(reservoir)) {
         return lighting;
     }
 
     float visibility = traceFogVisibility(samplePos, pickedDir, max(pickedDist - 0.8, 0.05));
     if (visibility <= 1e-3) { return lighting; }
 
-    // WRS estimator: contribution * (sumW / (M · targetPdf(picked))).
-    float invDenom = 1.0 / (reservoir.M * reservoir.pickedTargetPdf);
-    lighting = pickedContribution * visibility * reservoir.sumW * invDenom;
+    lighting = pickedContribution * visibility * restirUnbiasedContributionWeight(reservoir);
     return lighting;
 }
 
@@ -469,8 +429,8 @@ void applyVolumetricFog(vec3 radiance,
     //   the conservative choice: under fast camera motion the geometry mismatch
     //   would drive the reweight to zero anyway, and the WRS path naturally falls
     //   back to the current-frame Phase 3 estimator.
-    LocalFogReservoir prevReservoir   = loadLocalFogReservoir(pixel);
-    LocalFogReservoir mergedReservoir = emptyLocalFogReservoir();
+    RestirReservoir prevReservoir   = loadLocalFogReservoir(pixel);
+    RestirReservoir mergedReservoir = restirEmptyReservoir();
     int mergeStepIndex = max(stepCount / 2, 0);
 
     for (int i = 0; i < stepCount; ++i) {
@@ -481,7 +441,7 @@ void applyVolumetricFog(vec3 radiance,
         vec3 lighting = sampleDirectionalFogLighting(marchPos, viewDir, fogRadiance);
 
         bool doMerge = (i == mergeStepIndex);
-        LocalFogReservoir stepReservoir;
+        RestirReservoir stepReservoir;
         vec3 localLight = sampleLocalFogLighting(marchPos, viewDir, risSeed,
                                                  stepReservoir, doMerge, prevReservoir) * 0.75;
         if (doMerge) { mergedReservoir = stepReservoir; }
