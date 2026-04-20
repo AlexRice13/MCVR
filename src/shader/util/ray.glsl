@@ -3,6 +3,46 @@
 
 #include "util/ray_payloads.glsl"
 
+// Phase 5 — Tier 1 self-intersection / precision helpers.
+//
+// offsetRay() is the algorithm from Ray Tracing Gems Ch. 6 ("A Fast and Robust
+// Method for Avoiding Self-Intersection", Wächter & Binder). It nudges a
+// surface-hit point along its geometric normal by an amount that is exactly one
+// ULP-scale step in the direction the position needs to move to avoid
+// re-intersecting the originating triangle, regardless of the world-space
+// magnitude of the position. This decouples the offset from any fixed epsilon
+// like 0.0001 — which is too small at large world coords (false self-hits) and
+// unnecessarily large near origin (visible surface-detach artifacts).
+//
+// CRITICAL: `n` MUST be the *geometric* face normal (cross of two edges), not
+// the shading/interpolated normal. Using a perturbed normal can push the
+// origin *into* the surface near concave edges.
+vec3 offsetRay(vec3 p, vec3 n) {
+    const float origin     = 1.0 / 32.0;
+    const float floatScale = 1.0 / 65536.0;
+    const float intScale   = 256.0;
+    ivec3 of_i = ivec3(intScale * n);
+    vec3 p_i = vec3(
+        intBitsToFloat(floatBitsToInt(p.x) + ((p.x < 0.0) ? -of_i.x : of_i.x)),
+        intBitsToFloat(floatBitsToInt(p.y) + ((p.y < 0.0) ? -of_i.y : of_i.y)),
+        intBitsToFloat(floatBitsToInt(p.z) + ((p.z < 0.0) ? -of_i.z : of_i.z)));
+    return vec3(
+        abs(p.x) < origin ? p.x + floatScale * n.x : p_i.x,
+        abs(p.y) < origin ? p.y + floatScale * n.y : p_i.y,
+        abs(p.z) < origin ? p.z + floatScale * n.z : p_i.z);
+}
+
+// Adaptive tMin scaled to the world-space magnitude of the ray origin. At
+// large world coordinates float ULP grows ~|x| * 2^-23, so a fixed tMin of
+// 1e-4 m is below the quantization noise and lets self-intersections through.
+// We pick a 1e-6 multiplier (≈ 8 ULP at unit scale) with a 1e-4 floor for
+// near-origin rays. Used by every traceRayEXT in the project as a robust
+// drop-in replacement for hand-tuned tMin constants.
+float adaptiveTMin(vec3 origin) {
+    float scale = max(max(abs(origin.x), abs(origin.y)), abs(origin.z));
+    return max(1e-4, scale * 1e-6);
+}
+
 const uint rayBounceMask = 0xFFu;
 const uint rayInsideBoatBit = 1u << 8u;
 const uint rayStopBit = 1u << 9u;

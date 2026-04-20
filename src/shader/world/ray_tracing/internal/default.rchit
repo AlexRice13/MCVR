@@ -323,13 +323,13 @@ void main() {
             float lightPdf;
             vec3 lightBRDF = DisneyEval(mat, viewDir, normal, sampledLightDir, lightPdf);
             if (lightPdf > 1e-6) {
-                vec3 shadowRayOrigin = worldPos + (sampledLightNoL > 0.0 ? geoNormal : -geoNormal) * 0.0001;
+                vec3 shadowRayOrigin = offsetRay(worldPos, sampledLightNoL > 0.0 ? geoNormal : -geoNormal);
                 shadowRay.radiance = vec3(0.0);
                 shadowRay.throughput = vec3(1.0);
                 shadowRay.insideBoat = rayInsideBoat(mainRay) ? 1u : 0u;
 
                 traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, WORLD_MASK | PLAYER_MASK | CLOUD_MASK, 0, 0, 0, shadowRayOrigin,
-                            0.0001, sampledLightDir, 1000.0, 1);
+                            0.0, sampledLightDir, 1000.0, 1);
 
                 float progress = skyUBO.rainGradient;
                 vec3 lightRadiance = shadowRay.radiance * mainRay.throughput * lightBRDF;
@@ -363,7 +363,7 @@ void main() {
     mainRay.throughput *= bsdf / max(pdf, 1e-4);
 
     vec3 offsetDir = dot(sampleDir, geoNormal) > 0.0 ? geoNormal : -geoNormal;
-    mainRay.origin = worldPos + offsetDir * 0.0001;
+    mainRay.origin = offsetRay(worldPos, offsetDir);
     mainRay.direction = sampleDir;
     raySetStop(mainRay, false);
 }

@@ -243,7 +243,7 @@ float traceFogVisibility(vec3 origin, vec3 lightDir, float maxDistance) {
     shadowRay.radiance = vec3(0.0);
     shadowRay.throughput = vec3(1.0);
     shadowRay.insideBoat = 0u;
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, WORLD_MASK | PLAYER_MASK | CLOUD_MASK, 0, 0, 0, origin, 0.02,
+    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, WORLD_MASK | PLAYER_MASK | CLOUD_MASK, 0, 0, 0, origin, adaptiveTMin(origin),
                 lightDir, max(maxDistance, 0.05), 1);
     float visibility = max(max(shadowRay.radiance.r, shadowRay.radiance.g), shadowRay.radiance.b);
     return clamp(visibility / fogShadowReference(), 0.0, 1.0);
@@ -762,14 +762,14 @@ void tracePrimary(vec3 eyePos,
  #if USE_SER_PRIMARY
         hitObjectNV hitObj;
         hitObjectRecordEmptyNV(hitObj);
-        hitObjectTraceRayNV(hitObj, topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        hitObjectTraceRayNV(hitObj, topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
         reorderThreadNV(hitObj);
         hitObjectExecuteShaderNV(hitObj, 0);
         if (isInvalidSerMainRay(mainRay)) {
-            traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+            traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
         }
  #else
-        traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
  #endif
         rayState = mainRay;
 
@@ -827,7 +827,10 @@ bool initTransparent(MainRay rayState,
     if (max(branchThroughput.r, max(branchThroughput.g, branchThroughput.b)) <= 1e-6) { return false; }
 
     branchRay = rayState;
-    branchRay.origin = worldPos + (dot(branchDirection, normal) > 0.0 ? normal : -normal) * 0.0001;
+    // Phase 5: ULP-aware origin offset along the face normal (shading normal here —
+    // the geoNormal isn't currently propagated to this site; flat block faces make
+    // the two equivalent in practice). Eliminates the fixed-0.0001 self-intersect risk.
+    branchRay.origin = offsetRay(worldPos, dot(branchDirection, normal) > 0.0 ? normal : -normal);
     branchRay.direction = branchDirection;
     branchRay.radiance = vec3(0.0);
     branchRay.throughput = branchThroughput;
@@ -873,14 +876,14 @@ void traceSecondary(inout MainRay rayState,
 #if USE_SER_SECONDARY
         hitObjectNV hitObj;
         hitObjectRecordEmptyNV(hitObj);
-        hitObjectTraceRayNV(hitObj, topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, 0.001, mainRay.direction, len, 0);
+        hitObjectTraceRayNV(hitObj, topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
         reorderThreadNV(hitObj);
         hitObjectExecuteShaderNV(hitObj, 0);
         if (isInvalidSerMainRay(mainRay)) {
-            traceRayEXT(topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, 0.001, mainRay.direction, len, 0);
+            traceRayEXT(topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
         }
 #else
-        traceRayEXT(topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, 0.001, mainRay.direction, len, 0);
+        traceRayEXT(topLevelAS, kRayFlags, mask, 1, 1, 1, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
 #endif
         rayState = mainRay;
 
@@ -970,14 +973,14 @@ void traceSharcUpdate(
  #if USE_SER_SHARC_UPDATE
         hitObjectNV hitObj;
         hitObjectRecordEmptyNV(hitObj);
-        hitObjectTraceRayNV(hitObj, topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        hitObjectTraceRayNV(hitObj, topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
         reorderThreadNV(hitObj);
         hitObjectExecuteShaderNV(hitObj, 0);
         if (isInvalidSerMainRay(mainRay)) {
-            traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+            traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
         }
  #else
-        traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 1, mainRay.origin, adaptiveTMin(mainRay.origin), mainRay.direction, len, 0);
  #endif
 
         if (mainRay.hitT == INF_DISTANCE) {

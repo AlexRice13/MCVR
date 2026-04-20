@@ -295,9 +295,10 @@ void main() {
     vec3 cloudTopPos = worldOrigin + rayDir * tEntry;
     shadowRay.radiance = vec3(0.0);
     shadowRay.throughput = vec3(1.0);
+    vec3 cloudShadowOrigin = cloudTopPos - camWorldPos;
     traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
                 WORLD_MASK, 0, 0, 0,
-                cloudTopPos - camWorldPos, 0.001, lightDir, 10000.0, 1);
+                cloudShadowOrigin, adaptiveTMin(cloudShadowOrigin), lightDir, 10000.0, 1);
     vec3 sunColor = shadowRay.radiance;
 
     for (int i = 0; i < steps; i++, marchPos += increment) {
