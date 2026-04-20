@@ -40,10 +40,12 @@ const float kFogTemporalMinAlphaReconstructed = 0.05;
 const float kFogTemporalMaxHistory = 64.0;
 const float kFogTemporalMaxHistoryReconstructed = 24.0;
 
-const float kFogTemporalAdditiveMinAlpha = 0.004;            // ~250 frames history for RGB
-const float kFogTemporalAdditiveMinAlphaReconstructed = 0.015;
-const float kFogTemporalAdditiveMaxHistory = 256.0;
-const float kFogTemporalAdditiveMaxHistoryReconstructed = 64.0;
+const float kFogTemporalAdditiveMinAlpha = 0.003;            // ~333 frames history for RGB
+const float kFogTemporalAdditiveMinAlphaReconstructed = 0.01;
+const float kFogTemporalAdditiveMaxHistory = 320.0;
+const float kFogTemporalAdditiveMaxHistoryReconstructed = 96.0;
+const vec4 kFogTemporalVarianceClampK = vec4(2.05, 2.05, 2.05, 2.0);
+const vec4 kFogTemporalVarianceClampKReconstructed = vec4(2.35, 2.35, 2.35, 2.1);
 
 bool inBounds(ivec2 pixel, ivec2 size) {
     return pixel.x >= 0 && pixel.y >= 0 && pixel.x < size.x && pixel.y < size.y;
@@ -89,7 +91,7 @@ vec4 reconstructFogData(ivec2 pixel, ivec2 size) {
     return vec4(additive / float(sampleCount), transmittance / float(sampleCount));
 }
 
-vec4 clampFogHistory(ivec2 pixel, ivec2 size, vec4 historyFog, vec4 currentFog) {
+vec4 clampFogHistory(ivec2 pixel, ivec2 size, vec4 historyFog, vec4 currentFog, bool checkerboardReconstructed) {
     // Variance-aware AABB: instead of a hard min/max box (which over-clamps under
     // single-sample noise), build mean/variance from the 3×3 neighborhood and clamp
     // against mean ± k·sigma. This widens the acceptance window proportional to local
@@ -123,14 +125,25 @@ vec4 clampFogHistory(ivec2 pixel, ivec2 size, vec4 historyFog, vec4 currentFog) 
     vec4 variance = max(m2 / float(n) - mean * mean, vec4(0.0));
     vec4 sigma = sqrt(variance);
 
+    // Phase 5 tuning: the remaining Overworld noise is dominated by checkerboarded
+    // directional shafts and sparse local-light additive variance. Give the additive
+    // RGB channels a wider variance window than before, and widen it further for
+    // reconstructed pixels whose 3x3 neighborhood is inherently less reliable.
+    // Keep transmittance tighter so depth/occlusion response still snaps quickly.
+    //
+    // This preserves the anti-firefly behavior from Phase 4, but stops legitimate
+    // shaft visibility changes from being clipped out of history before they can
+    // converge.
+    //
     // Phase 4 follow-up: relaxed RGB clamp from 1.5 → 1.8 σ. Once the per-pixel
     // local-fog reservoir was cleaned up, the additive RGB neighborhood variance
     // dropped significantly — making the old 1.5σ window so tight that legitimate
     // single-frame sun-shaft visibility variance (binary shadow ray, 1 spp/step)
     // got clamped out of the history, preventing temporal accumulation. 1.8σ keeps
     // dense-emitter firefly rejection essentially intact while letting sun shafts
-    // converge over the long (192-frame) additive history again.
-    const vec4 kVarianceClampK = vec4(1.8, 1.8, 1.8, 2.0); // tighter on RGB, looser on A
+    // converge over the long additive history again.
+    vec4 kVarianceClampK = checkerboardReconstructed ? kFogTemporalVarianceClampKReconstructed
+                                                     : kFogTemporalVarianceClampK;
     vec4 lo = mean - sigma * kVarianceClampK;
     vec4 hi = mean + sigma * kVarianceClampK;
     return clamp(historyFog, lo, hi);
@@ -221,7 +234,8 @@ void main() {
         historyLength = 1.0;
 
         if (hasReprojectedFog) {
-            reprojectedFogData = clampFogHistory(pixel, size, reprojectedFogData, currentFogData);
+            reprojectedFogData = clampFogHistory(pixel, size, reprojectedFogData, currentFogData,
+                                                 fogWasCheckerboardSkipped);
 
             // Phase 3 dual-stream blend: stiff alpha on RGB (additive radiance) so that
             // dense-emitter binary-visibility noise smooths out over hundreds of frames,

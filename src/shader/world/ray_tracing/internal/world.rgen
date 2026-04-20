@@ -371,7 +371,7 @@ vec3 sampleLocalFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed,
             // making the WRS estimator W = sumW / (M·targetPdf) diverge linearly
             // and freezing the pixel onto the picked-light's per-frame visibility
             // noise (the "sticky on-screen noise" failure mode).
-            const float kReservoirMMax = 10.0;
+            const float kReservoirMMax = 20.0;
             float prevMCapped = min(prevReservoir.M, kReservoirMMax);
             float mScale      = prevMCapped / max(prevReservoir.M, 1.0);
             float prevSumWCapped = prevReservoir.sumW * mScale;
