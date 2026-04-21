@@ -34,7 +34,6 @@ struct RayTracingPushConstant {
     uint32_t volumetricFogEnabled;
     float volumetricFogStrength;
     uint32_t volumetricFogSamplingMode;
-    uint32_t transparentRefractionSamplingMode;
     uint32_t volumetricFogDisableInRain;
 };
 
@@ -47,12 +46,6 @@ enum RayTracingVolumetricFogSamplingMode {
     RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_HALF = 0,
     RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_QUARTER = 1,
     RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_FULL_RES = 2,
-};
-
-enum RayTracingTransparentRefractionSamplingMode {
-    RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_CHECKERBOARD_HALF = 0,
-    RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_CHECKERBOARD_QUARTER = 1,
-    RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_FULL_RES = 2,
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -184,15 +177,12 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> worldLightMapVertShader_;
     std::shared_ptr<vk::Shader> worldLightMapFragShader_;
     std::shared_ptr<vk::Shader> fogTemporalCompShader_;
-    std::shared_ptr<vk::Shader> refractionTemporalCompShader_;
 
     std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables_;
     std::vector<std::shared_ptr<vk::DescriptorTable>> fogTemporalDescriptorTables_;
-    std::vector<std::shared_ptr<vk::DescriptorTable>> refractionTemporalDescriptorTables_;
     std::shared_ptr<vk::RayTracingPipeline> rayTracingUpdatePipeline_;
     std::shared_ptr<vk::RayTracingPipeline> rayTracingQueryPipeline_;
     std::shared_ptr<vk::ComputePipeline> fogTemporalPipeline_;
-    std::shared_ptr<vk::ComputePipeline> refractionTemporalPipeline_;
     std::vector<std::shared_ptr<vk::SBT>> sharcUpdateSbts_;
     std::vector<std::shared_ptr<vk::SBT>> sharcQuerySbts_;
 
@@ -209,7 +199,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     uint32_t sharcFrameIndex_ = 0;
     bool sharcFirstFrame_ = true;
     int32_t lastFogHistoryFrameIndex_ = -1;
-    int32_t lastRefractionHistoryFrameIndex_ = -1;
 
     uint32_t numRayBounces_ = 4;
     bool useJitter_ = true;
@@ -223,8 +212,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     bool volumetricFogDisableInRain_ = true;
     float volumetricFogStrength_ = 3.5f;
     uint32_t volumetricFogSamplingMode_ = RAY_TRACING_VOLUMETRIC_FOG_SAMPLING_MODE_CHECKERBOARD_QUARTER;
-    uint32_t transparentRefractionSamplingMode_ =
-        RAY_TRACING_TRANSPARENT_REFRACTION_SAMPLING_MODE_CHECKERBOARD_QUARTER;
     bool useSharc_ = true;
     uint32_t sharcDebugMode_ = 0;
     std::string shaderPackPath_;
@@ -259,9 +246,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     // emitter scenes (Nether lava, glowstone). Format: RGBA32F, ping-pong via the
     // existing lastFogHistoryFrameIndex_ index.
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> localFogReservoirImages_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> refractionHistoryImages_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> refractionHistoryDepthImages_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> refractionHistoryLengthImages_;
 
     // submodules
     std::shared_ptr<Atmosphere> atmosphere_;

@@ -180,7 +180,6 @@ layout(push_constant) uniform PushConstant {
     uint volumetricFogEnabled;
     float volumetricFogStrength;
     uint volumetricFogSamplingMode;
-    uint transparentRefractionSamplingMode;
     uint volumetricFogDisableInRain;
 }
 pc;
@@ -194,13 +193,9 @@ const uint kTransparentSplitModeDeterministic = 0u;
 const uint kVolumetricFogSamplingModeCheckerboardHalf = 0u;
 const uint kVolumetricFogSamplingModeCheckerboardQuarter = 1u;
 const uint kVolumetricFogSamplingModeFullRes = 2u;
-const uint kTransparentRefractionSamplingModeCheckerboardHalf = 0u;
-const uint kTransparentRefractionSamplingModeCheckerboardQuarter = 1u;
-const uint kTransparentRefractionSamplingModeFullRes = 2u;
 const float kVolumetricFogBaseDensity = 3.0;
 const float kVolumetricFogDefaultStrength = 3.5;
 const float kFogComposeCheckerboardSentinel = -2.0;
-const float kRefractionCheckerboardSentinel = -2.0;
 
 bool shouldDisableVolumetricFogForRain() {
     return pc.volumetricFogDisableInRain != 0u && skyUBO.rainGradient > 1e-3;
@@ -614,12 +609,10 @@ bool isHalfRatePixel(ivec2 px) {
 }
 
 bool shouldTraceSparseSample(ivec2 px, uint samplingMode) {
-    if (samplingMode == kVolumetricFogSamplingModeCheckerboardHalf ||
-        samplingMode == kTransparentRefractionSamplingModeCheckerboardHalf) {
+    if (samplingMode == kVolumetricFogSamplingModeCheckerboardHalf) {
         return isHalfRatePixel(px);
     }
-    if (samplingMode == kVolumetricFogSamplingModeCheckerboardQuarter ||
-        samplingMode == kTransparentRefractionSamplingModeCheckerboardQuarter) {
+    if (samplingMode == kVolumetricFogSamplingModeCheckerboardQuarter) {
         return isQuarterRatePixel(px);
     }
     return true;
@@ -1034,7 +1027,6 @@ void main() {
     bool hasTransparentReflectionSecondHit = false;
     float transparentReflectionSecondHitDistance = 0.0;
     bool useTransparentSplit = false;
-    bool skipTransparentRefractionTrace = false;
     vec3 composeFogAdditive = vec3(0.0);
     float composeFogTransmittance = -1.0;
 #    if SHARC_QUERY && USE_SHARC
@@ -1104,7 +1096,6 @@ void main() {
         hasTransparentReflectionSecondHit = false;
         transparentReflectionSecondHitDistance = 0.0;
         useTransparentSplit = false;
-        skipTransparentRefractionTrace = false;
 #    if USE_SHARC && SHARC_QUERY
         sharcDebugBounceCount = 0;
         sharcDebugCacheHit = false;
@@ -1172,19 +1163,15 @@ void main() {
                     MainRay transparentRefractionRay;
                     if (initTransparent(mainRay, firstHitMat, firstHitIncomingDirection, firstHitNormal,
                                         firstHitWorldPos, 0x3C6EF372u, false, transparentRefractionRay)) {
-                        if (shouldTraceSparseSample(pixel, pc.transparentRefractionSamplingMode)) {
-                            bool hasTransparentRefractionSecondHit = false;
-                            float transparentRefractionSecondHitDistance = 0.0;
-                            traceTransparent(transparentRefractionRay, startBounce, isHand,
+                        bool hasTransparentRefractionSecondHit = false;
+                        float transparentRefractionSecondHitDistance = 0.0;
+                        traceTransparent(transparentRefractionRay, startBounce, isHand,
 #    if SHARC_QUERY && USE_SHARC
-                                             sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+                                         sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
 #    endif
-                                             hasTransparentRefractionSecondHit, transparentRefractionSecondHitDistance);
-                            transparentRefractionRadiance = transparentRefractionRay.radiance;
-                            hasTransparentRefraction = true;
-                        } else {
-                            skipTransparentRefractionTrace = true;
-                        }
+                                         hasTransparentRefractionSecondHit, transparentRefractionSecondHitDistance);
+                        transparentRefractionRadiance = transparentRefractionRay.radiance;
+                        hasTransparentRefraction = true;
                     }
 
                     mainRay.radiance = transparentReflectionRadiance + transparentRefractionRadiance;
@@ -1324,12 +1311,8 @@ void main() {
             imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
             imageStore(firstHitSpecularImage, ivec2(pixel), vec4(transparentReflectionRadiance, 1.0));
             imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
-            if (skipTransparentRefractionTrace) {
-                imageStore(firstHitRefractionImage, ivec2(pixel), vec4(vec3(0.0), kRefractionCheckerboardSentinel));
-            } else {
-                imageStore(firstHitRefractionImage, ivec2(pixel),
-                           vec4(transparentRefractionRadiance, hasTransparentRefraction ? 1.0 : -1.0));
-            }
+            imageStore(firstHitRefractionImage, ivec2(pixel),
+                       vec4(transparentRefractionRadiance, hasTransparentRefraction ? 1.0 : -1.0));
         } else if (isFirstHitDiffuse) {
             imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(firstHitDirectRadiance, 1.0));
             imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(firstHitIndirectRadiance, 1.0));
