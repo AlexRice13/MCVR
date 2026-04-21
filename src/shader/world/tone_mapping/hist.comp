@@ -25,6 +25,12 @@ layout(push_constant) uniform PushConstant {
     float exposureBias;
     float whitePoint;
     float saturation;
+    float contrast;
+    float gradingGamma;
+    float lift;
+    float gain;
+    float temperature;
+    float tint;
     int toneMappingMethod;
     int autoExposure;
     int clampOutput;

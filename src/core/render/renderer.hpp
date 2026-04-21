@@ -19,7 +19,7 @@ struct Options {
     bool hdrActive = false;
     float hdrMinLuminance = 0.0f;
     float hdrMaxLuminance = 1000.0f;
-    float hdrGamma = 1.0f;
+    float hdrRollOff = 1.0f;
     float sdrBrightness = 200.0f;
     uint32_t dlssMode = 1;
     uint32_t upscalerType = 1;
@@ -28,6 +28,7 @@ struct Options {
     uint32_t rayBounces = 4;
     uint32_t debugMode = 0;
     bool needRecreate = false;
+    bool scenarioGradingIsolation = false;
 
     uint32_t chunkBuildingBatchSize = 32;
     uint32_t chunkBuildingTotalBatches = 4;

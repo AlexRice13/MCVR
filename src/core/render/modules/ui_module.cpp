@@ -1223,7 +1223,8 @@ void UIModuleContext::clearOverlayEntireColorAttachment() {
     clearAttachment.clearValue.color.float32[0] = overlayClearColors[0];
     clearAttachment.clearValue.color.float32[1] = overlayClearColors[1];
     clearAttachment.clearValue.color.float32[2] = overlayClearColors[2];
-    clearAttachment.clearValue.color.float32[3] = overlayClearColors[3];
+    clearAttachment.clearValue.color.float32[3] =
+        Renderer::options.scenarioGradingIsolation ? 0.0f : overlayClearColors[3];
 
     VkClearRect clearRect{};
     clearRect.rect.offset = {0, 0};

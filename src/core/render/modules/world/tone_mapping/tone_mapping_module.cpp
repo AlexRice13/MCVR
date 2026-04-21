@@ -3,6 +3,7 @@
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
+#include "core/render/scenario_color_grading.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -54,6 +55,65 @@ int parseExposureMeteringModeValue(const std::string &value, int fallback) {
 
 } // namespace
 
+ToneMappingSettings createDefaultToneMappingSettings() {
+    return ToneMappingSettings{};
+}
+
+void applyToneMappingAttributeKV(ToneMappingSettings &settings, const std::string &key, const std::string &value) {
+    float floatValue = 0.0f;
+    if (key == "render_pipeline.module.tone_mapping.attribute.middle_grey") {
+        if (tryParseFloat(value, floatValue)) settings.middleGrey = std::max(floatValue, 1e-4f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_up_speed") {
+        if (tryParseFloat(value, floatValue)) settings.speedUp = std::max(floatValue, 0.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_down_speed") {
+        if (tryParseFloat(value, floatValue)) settings.speedDown = std::max(floatValue, 0.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.log2_luminance_min") {
+        if (tryParseFloat(value, floatValue)) settings.log2Min = floatValue;
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.log2_luminance_max") {
+        if (tryParseFloat(value, floatValue)) settings.log2Max = floatValue;
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.histogram_epsilon") {
+        if (tryParseFloat(value, floatValue)) settings.epsilon = std::max(floatValue, 1e-8f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.low_percent") {
+        if (tryParseFloat(value, floatValue)) settings.lowPercent = floatValue;
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.high_percent") {
+        if (tryParseFloat(value, floatValue)) settings.highPercent = floatValue;
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.min_exposure") {
+        if (tryParseFloat(value, floatValue)) settings.minExposure = std::max(floatValue, 1e-6f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
+        if (tryParseFloat(value, floatValue)) settings.maxExposure = std::max(floatValue, 1e-6f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.enable_auto_exposure") {
+        settings.autoExposure = parseBoolValue(value, settings.autoExposure);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.manual_exposure") {
+        if (tryParseFloat(value, floatValue)) settings.manualExposure = std::max(floatValue, 1e-6f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_bias") {
+        if (tryParseFloat(value, floatValue)) settings.exposureBias = floatValue;
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.white_point") {
+        if (tryParseFloat(value, floatValue)) settings.whitePoint = std::max(floatValue, 1e-3f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.saturation") {
+        if (tryParseFloat(value, floatValue)) settings.saturation = std::max(floatValue, 0.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.contrast") {
+        if (tryParseFloat(value, floatValue)) settings.contrast = std::max(floatValue, 0.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.gamma") {
+        if (tryParseFloat(value, floatValue)) settings.gradingGamma = std::max(floatValue, 1e-3f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.lift") {
+        if (tryParseFloat(value, floatValue)) settings.lift = floatValue;
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.gain") {
+        if (tryParseFloat(value, floatValue)) settings.gain = std::max(floatValue, 0.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.temperature") {
+        if (tryParseFloat(value, floatValue)) settings.temperature = std::clamp(floatValue, -1.0f, 1.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.tint") {
+        if (tryParseFloat(value, floatValue)) settings.tint = std::clamp(floatValue, -1.0f, 1.0f);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.clamp_output") {
+        settings.clampOutput = parseBoolValue(value, settings.clampOutput);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.method") {
+        settings.toneMappingMethod = parseToneMappingMethodValue(value, settings.toneMappingMethod);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_metering_mode") {
+        settings.exposureMeteringMode = parseExposureMeteringModeValue(value, settings.exposureMeteringMode);
+    } else if (key == "render_pipeline.module.tone_mapping.attribute.center_metering_percent") {
+        if (tryParseFloat(value, floatValue)) settings.centerMeteringPercent = std::clamp(floatValue, 1.0f, 100.0f);
+    }
+}
+
 ToneMappingModule::ToneMappingModule() {}
 
 void ToneMappingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -97,51 +157,38 @@ bool ToneMappingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::
 }
 
 void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
+    ToneMappingSettings settings = captureBaseSettings();
     for (int i = 0; i < attributeCount; i++) {
         const std::string &key = attributeKVs[2 * i];
         const std::string &value = attributeKVs[2 * i + 1];
-
-        float floatValue = 0.0f;
-        if (key == "render_pipeline.module.tone_mapping.attribute.middle_grey") {
-            if (tryParseFloat(value, floatValue)) middleGrey_ = std::max(floatValue, 1e-4f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_up_speed") {
-            if (tryParseFloat(value, floatValue)) speedUp_ = std::max(floatValue, 0.0f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_down_speed") {
-            if (tryParseFloat(value, floatValue)) speedDown_ = std::max(floatValue, 0.0f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.log2_luminance_min") {
-            if (tryParseFloat(value, floatValue)) log2Min_ = floatValue;
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.log2_luminance_max") {
-            if (tryParseFloat(value, floatValue)) log2Max_ = floatValue;
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.histogram_epsilon") {
-            if (tryParseFloat(value, floatValue)) epsilon_ = std::max(floatValue, 1e-8f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.low_percent") {
-            if (tryParseFloat(value, floatValue)) lowPercent_ = floatValue;
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.high_percent") {
-            if (tryParseFloat(value, floatValue)) highPercent_ = floatValue;
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.min_exposure") {
-            if (tryParseFloat(value, floatValue)) minExposure_ = std::max(floatValue, 1e-6f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
-            if (tryParseFloat(value, floatValue)) maxExposure_ = std::max(floatValue, 1e-6f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.enable_auto_exposure") {
-            autoExposure_ = parseBoolValue(value, autoExposure_);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.manual_exposure") {
-            if (tryParseFloat(value, floatValue)) manualExposure_ = std::max(floatValue, 1e-6f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_bias") {
-            if (tryParseFloat(value, floatValue)) exposureBias_ = floatValue;
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.white_point") {
-            if (tryParseFloat(value, floatValue)) whitePoint_ = std::max(floatValue, 1e-3f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.saturation") {
-            if (tryParseFloat(value, floatValue)) saturation_ = std::max(floatValue, 0.0f);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.clamp_output") {
-            clampOutput_ = parseBoolValue(value, clampOutput_);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.method") {
-            toneMappingMethod_ = parseToneMappingMethodValue(value, toneMappingMethod_);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_metering_mode") {
-            exposureMeteringMode_ = parseExposureMeteringModeValue(value, exposureMeteringMode_);
-        } else if (key == "render_pipeline.module.tone_mapping.attribute.center_metering_percent") {
-            if (tryParseFloat(value, floatValue)) centerMeteringPercent_ = std::clamp(floatValue, 1.0f, 100.0f);
-        }
+        applyToneMappingAttributeKV(settings, key, value);
     }
+
+    middleGrey_ = settings.middleGrey;
+    speedUp_ = settings.speedUp;
+    speedDown_ = settings.speedDown;
+    log2Min_ = settings.log2Min;
+    log2Max_ = settings.log2Max;
+    epsilon_ = settings.epsilon;
+    lowPercent_ = settings.lowPercent;
+    highPercent_ = settings.highPercent;
+    minExposure_ = settings.minExposure;
+    maxExposure_ = settings.maxExposure;
+    manualExposure_ = settings.manualExposure;
+    exposureBias_ = settings.exposureBias;
+    whitePoint_ = settings.whitePoint;
+    saturation_ = settings.saturation;
+    contrast_ = settings.contrast;
+    gradingGamma_ = settings.gradingGamma;
+    lift_ = settings.lift;
+    gain_ = settings.gain;
+    temperature_ = settings.temperature;
+    tint_ = settings.tint;
+    toneMappingMethod_ = settings.toneMappingMethod;
+    autoExposure_ = settings.autoExposure;
+    clampOutput_ = settings.clampOutput;
+    exposureMeteringMode_ = settings.exposureMeteringMode;
+    centerMeteringPercent_ = settings.centerMeteringPercent;
 }
 
 void ToneMappingModule::build() {
@@ -175,6 +222,36 @@ void ToneMappingModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                                     int index) {}
 
 void ToneMappingModule::preClose() {}
+
+ToneMappingSettings ToneMappingModule::captureBaseSettings() const {
+    ToneMappingSettings settings = createDefaultToneMappingSettings();
+    settings.middleGrey = middleGrey_;
+    settings.speedUp = speedUp_;
+    settings.speedDown = speedDown_;
+    settings.log2Min = log2Min_;
+    settings.log2Max = log2Max_;
+    settings.epsilon = epsilon_;
+    settings.lowPercent = lowPercent_;
+    settings.highPercent = highPercent_;
+    settings.minExposure = minExposure_;
+    settings.maxExposure = maxExposure_;
+    settings.manualExposure = manualExposure_;
+    settings.exposureBias = exposureBias_;
+    settings.whitePoint = whitePoint_;
+    settings.saturation = saturation_;
+    settings.contrast = contrast_;
+    settings.gradingGamma = gradingGamma_;
+    settings.lift = lift_;
+    settings.gain = gain_;
+    settings.temperature = temperature_;
+    settings.tint = tint_;
+    settings.toneMappingMethod = toneMappingMethod_;
+    settings.autoExposure = autoExposure_;
+    settings.clampOutput = clampOutput_;
+    settings.exposureMeteringMode = exposureMeteringMode_;
+    settings.centerMeteringPercent = centerMeteringPercent_;
+    return settings;
+}
 
 void ToneMappingModule::initDescriptorTables() {
     auto framework = framework_.lock();
@@ -472,40 +549,50 @@ void ToneMappingModuleContext::render() {
     if (!std::isfinite(dtSeconds)) dtSeconds = 1.0f / 60.0f;
     dtSeconds = std::clamp(dtSeconds, 0.0f, 1.0f);
 
-    float sanitizedLog2Min = std::min(module->log2Min_, module->log2Max_ - 1e-3f);
-    float sanitizedLog2Max = std::max(module->log2Max_, sanitizedLog2Min + 1e-3f);
-    float sanitizedLowPercent = std::clamp(module->lowPercent_, 0.0f, 0.9999f);
-    float sanitizedHighPercent = std::clamp(module->highPercent_, sanitizedLowPercent + 1e-4f, 1.0f);
-    float sanitizedCenterMeteringPercent = std::clamp(module->centerMeteringPercent_, 1.0f, 100.0f) / 100.0f;
+    ToneMappingSettings resolvedSettings = module->captureBaseSettings();
+    if (auto *scenarioManager = ScenarioColorGradingManager::try_instance()) {
+        resolvedSettings = scenarioManager->resolveSettings(resolvedSettings, Renderer::options.hdrActive);
+    }
+    float sanitizedLog2Min = std::min(resolvedSettings.log2Min, resolvedSettings.log2Max - 1e-3f);
+    float sanitizedLog2Max = std::max(resolvedSettings.log2Max, sanitizedLog2Min + 1e-3f);
+    float sanitizedLowPercent = std::clamp(resolvedSettings.lowPercent, 0.0f, 0.9999f);
+    float sanitizedHighPercent = std::clamp(resolvedSettings.highPercent, sanitizedLowPercent + 1e-4f, 1.0f);
+    float sanitizedCenterMeteringPercent = std::clamp(resolvedSettings.centerMeteringPercent, 1.0f, 100.0f) / 100.0f;
 
     ToneMappingModulePushConstant pc{};
     pc.log2Min = sanitizedLog2Min;
     pc.log2Max = sanitizedLog2Max;
-    pc.epsilon = std::max(module->epsilon_, 1e-8f);
+    pc.epsilon = std::max(resolvedSettings.epsilon, 1e-8f);
     pc.lowPercent = sanitizedLowPercent;
     pc.highPercent = sanitizedHighPercent;
-    pc.middleGrey = std::max(module->middleGrey_, 1e-4f);
+    pc.middleGrey = std::max(resolvedSettings.middleGrey, 1e-4f);
     pc.dt = dtSeconds;
-    pc.speedUp = std::max(module->speedUp_, 0.0f);
-    pc.speedDown = std::max(module->speedDown_, 0.0f);
-    pc.minExposure = std::max(module->minExposure_, 1e-6f);
-    pc.maxExposure = std::max(module->maxExposure_, pc.minExposure);
-    pc.manualExposure = std::max(module->manualExposure_, 1e-6f);
-    pc.exposureBias = module->exposureBias_;
-    pc.whitePoint = std::max(module->whitePoint_, 1e-3f);
-    pc.saturation = std::max(module->saturation_, 0.0f);
-    pc.toneMappingMethod = std::clamp(module->toneMappingMethod_, static_cast<int>(TONE_MAPPING_METHOD_PBR_NEUTRAL),
+    pc.speedUp = std::max(resolvedSettings.speedUp, 0.0f);
+    pc.speedDown = std::max(resolvedSettings.speedDown, 0.0f);
+    pc.minExposure = std::max(resolvedSettings.minExposure, 1e-6f);
+    pc.maxExposure = std::max(resolvedSettings.maxExposure, pc.minExposure);
+    pc.manualExposure = std::max(resolvedSettings.manualExposure, 1e-6f);
+    pc.exposureBias = resolvedSettings.exposureBias;
+    pc.whitePoint = std::max(resolvedSettings.whitePoint, 1e-3f);
+    pc.saturation = std::max(resolvedSettings.saturation, 0.0f);
+    pc.contrast = std::max(resolvedSettings.contrast, 0.0f);
+    pc.gradingGamma = std::max(resolvedSettings.gradingGamma, 1e-3f);
+    pc.lift = resolvedSettings.lift;
+    pc.gain = std::max(resolvedSettings.gain, 0.0f);
+    pc.temperature = std::clamp(resolvedSettings.temperature, -1.0f, 1.0f);
+    pc.tint = std::clamp(resolvedSettings.tint, -1.0f, 1.0f);
+    pc.toneMappingMethod = std::clamp(resolvedSettings.toneMappingMethod, static_cast<int>(TONE_MAPPING_METHOD_PBR_NEUTRAL),
                                       static_cast<int>(TONE_MAPPING_METHOD_UNCHARTED2));
-    pc.autoExposure = module->autoExposure_ ? 1 : 0;
-    pc.clampOutput = module->clampOutput_ ? 1 : 0;
+    pc.autoExposure = resolvedSettings.autoExposure ? 1 : 0;
+    pc.clampOutput = resolvedSettings.clampOutput ? 1 : 0;
     pc.exposureMeteringMode =
-        std::clamp(module->exposureMeteringMode_, static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL),
+        std::clamp(resolvedSettings.exposureMeteringMode, static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL),
                    static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER));
     pc.centerMeteringPercent = sanitizedCenterMeteringPercent;
     pc.hdrActive = Renderer::options.hdrActive ? 1 : 0;
     pc.hdrMinLuminance = std::max(Renderer::options.hdrMinLuminance, 0.0f);
     pc.hdrMaxLuminance = std::max(Renderer::options.hdrMaxLuminance, pc.hdrMinLuminance + 1e-3f);
-    pc.hdrGamma = std::max(Renderer::options.hdrGamma, 1e-3f);
+    pc.hdrRollOff = std::max(Renderer::options.hdrRollOff, 1e-3f);
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,

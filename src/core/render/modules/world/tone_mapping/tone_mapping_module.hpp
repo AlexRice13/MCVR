@@ -6,6 +6,7 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 #include <chrono>
 #include <cstdint>
+#include <string>
 
 #include "core/render/modules/world/world_module.hpp"
 
@@ -37,6 +38,40 @@ enum ToneMappingExposureMeteringMode : int32_t {
     TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER = 1,
 };
 
+struct ToneMappingSettings {
+    float middleGrey = 0.18f;
+    float speedUp = 3.0f;
+    float speedDown = 3.0f;
+
+    float log2Min = -12.0f;
+    float log2Max = 4.0f;
+    float epsilon = 1e-6f;
+    float lowPercent = 0.005f;
+    float highPercent = 0.99f;
+    float minExposure = 1e-4f;
+    float maxExposure = 1.2f;
+
+    float manualExposure = 1.0f;
+    float exposureBias = 0.0f;
+    float whitePoint = 11.2f;
+    float saturation = 1.0f;
+    float contrast = 1.0f;
+    float gradingGamma = 1.0f;
+    float lift = 0.0f;
+    float gain = 1.0f;
+    float temperature = 0.0f;
+    float tint = 0.0f;
+
+    int toneMappingMethod = TONE_MAPPING_METHOD_ACES_FITTED;
+    bool autoExposure = true;
+    bool clampOutput = true;
+    int exposureMeteringMode = TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL;
+    float centerMeteringPercent = 20.0f;
+};
+
+ToneMappingSettings createDefaultToneMappingSettings();
+void applyToneMappingAttributeKV(ToneMappingSettings &settings, const std::string &key, const std::string &value);
+
 struct ToneMappingModulePushConstant {
     float log2Min;
     float log2Max;
@@ -53,6 +88,12 @@ struct ToneMappingModulePushConstant {
     float exposureBias;
     float whitePoint;
     float saturation;
+    float contrast;
+    float gradingGamma;
+    float lift;
+    float gain;
+    float temperature;
+    float tint;
     int toneMappingMethod;
     int autoExposure;
     int clampOutput;
@@ -61,7 +102,7 @@ struct ToneMappingModulePushConstant {
     int hdrActive;
     float hdrMinLuminance;
     float hdrMaxLuminance;
-    float hdrGamma;
+    float hdrRollOff;
     float padding0;
     float padding1;
 };
@@ -95,6 +136,8 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index) override;
 
     void preClose() override;
+
+    ToneMappingSettings captureBaseSettings() const;
 
   private:
     static constexpr uint32_t histSize = 256;
@@ -145,6 +188,12 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     float exposureBias_ = 0.0f;
     float whitePoint_ = 11.2f;
     float saturation_ = 1.0f;
+    float contrast_ = 1.0f;
+    float gradingGamma_ = 1.0f;
+    float lift_ = 0.0f;
+    float gain_ = 1.0f;
+    float temperature_ = 0.0f;
+    float tint_ = 0.0f;
 
     int toneMappingMethod_ = TONE_MAPPING_METHOD_ACES_FITTED;
     bool autoExposure_ = true;

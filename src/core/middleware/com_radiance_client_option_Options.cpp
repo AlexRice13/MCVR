@@ -58,17 +58,21 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrMaxLu
         std::max(static_cast<float>(hdrMaxLuminance), Renderer::options.hdrMinLuminance + 1e-3f);
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrGamma(JNIEnv *,
-                                                                                 jclass,
-                                                                                 jfloat hdrGamma,
-                                                                                 jboolean write) {
-    Renderer::options.hdrGamma = std::max(static_cast<float>(hdrGamma), 1e-3f);
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrRollOff(JNIEnv *,
+                                                                                    jclass,
+                                                                                    jfloat hdrRollOff,
+                                                                                    jboolean write) {
+    Renderer::options.hdrRollOff = std::max(static_cast<float>(hdrRollOff), 1e-3f);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsHdrActive(JNIEnv *, jclass) {
+    return Renderer::options.hdrActive ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSdrBrightness(JNIEnv *,
-                                                                                       jclass,
-                                                                                       jfloat sdrBrightness,
-                                                                                       jboolean write) {
+                                                                                        jclass,
+                                                                                        jfloat sdrBrightness,
+                                                                                        jboolean write) {
     Renderer::options.sdrBrightness = std::max(static_cast<float>(sdrBrightness), 1.0f);
 }
 
