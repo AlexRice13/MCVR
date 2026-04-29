@@ -5,8 +5,24 @@
 
 #include <iostream>
 
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_initNative(JNIEnv *, jclass, jint chunkNum) {
-    Renderer::instance().world()->chunks()->reset(chunkNum);
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_initNative(JNIEnv *,
+                                                                                  jclass,
+                                                                                  jint chunkNum,
+                                                                                  jint sizeX,
+                                                                                  jint sizeY,
+                                                                                  jint sizeZ,
+                                                                                  jint bottomSectionCoord) {
+    Renderer::instance().world()->chunks()->reset(chunkNum, sizeX, sizeY, sizeZ, bottomSectionCoord);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_updateSectionPosNative(JNIEnv *,
+                                                                                              jclass,
+                                                                                              jint sectionX,
+                                                                                              jint sectionY,
+                                                                                              jint sectionZ) {
+    auto world = Renderer::instance().world();
+    if (world == nullptr) return;
+    world->chunks()->setChunkStorageSectionPos(glm::ivec3(sectionX, sectionY, sectionZ));
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_rebuildSingle(JNIEnv *,
@@ -47,6 +63,17 @@ JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_isChu
         return false;
     else
         return world->chunks()->isChunkReady(id);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_relocateSingle(JNIEnv *,
+                                                                                      jclass,
+                                                                                      jlong index,
+                                                                                      jint originX,
+                                                                                      jint originY,
+                                                                                      jint originZ) {
+    auto world = Renderer::instance().world();
+    if (world == nullptr) return;
+    world->chunks()->relocateChunk(index, originX, originY, originZ);
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_invalidateSingle(JNIEnv *, jclass, jlong index) {

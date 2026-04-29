@@ -1,5 +1,6 @@
 #include "core/render/textures.hpp"
 
+#include "core/render/emission.hpp"
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
@@ -17,14 +18,18 @@ Textures::Textures(std::shared_ptr<Framework> framework) {}
 
 void Textures::reset() {
     textures_.clear();
+    if (emission_ != nullptr) { emission_->reset(); }
     nextID = 0;
 }
 
 void Textures::resetFrame() {
     auto framework = Renderer::instance().framework();
 
-    framework->gc().collect(uploadQueue_);
+    collectCompletedUploadsImpl();
+
+    framework->frameResourceRetainer().retain(uploadQueue_);
     uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
+    queuedUploadBytes_ = 0;
 
     for (auto &entry : caches_) {
         auto &cache = entry.second;
@@ -41,8 +46,9 @@ uint32_t Textures::allocateTexture() {
 }
 
 void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width, uint32_t height, VkFormat format) {
-    auto device = Renderer::instance().framework()->device();
-    auto vma = Renderer::instance().framework()->vma();
+    auto framework = Renderer::instance().framework();
+    auto device = framework->device();
+    auto vma = framework->vma();
 
     std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
 
@@ -52,8 +58,7 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
         exit(EXIT_FAILURE);
     }
 
-    auto framework = Renderer::instance().framework();
-    framework->gc().collect(textures_[id]);
+    framework->frameResourceRetainer().retain(textures_[id]);
 #ifdef DEBUG
     if (textures_[id] != nullptr) { std::cout << "Textrue reinitialized: " << id << std::endl; }
 #endif
@@ -70,7 +75,7 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
         texturesCerr() << "The given texture id: " << id << " is not allocated for sampler" << std::endl;
         exit(EXIT_FAILURE);
     }
-    framework->gc().collect(samplers[id]);
+    framework->frameResourceRetainer().retain(samplers[id]);
     samplers[id] =
         vk::Sampler::create(device, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
@@ -91,7 +96,7 @@ void Textures::setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipm
         VkSamplerAddressMode addressMode = samplers[id]->vkAddressMode();
 
         auto framework = Renderer::instance().framework();
-        framework->gc().collect(samplers[id]);
+        framework->frameResourceRetainer().retain(samplers[id]);
         samplers[id] = vk::Sampler::create(device, samplingMode, mipmapMode, addressMode);
     }
 
@@ -113,7 +118,7 @@ void Textures::setAddressMode(uint32_t id, VkSamplerAddressMode addressMode) {
         VkSamplerMipmapMode mipmapMode = samplers[id]->vkMipmapMode();
 
         auto framework = Renderer::instance().framework();
-        framework->gc().collect(samplers[id]);
+        framework->frameResourceRetainer().retain(samplers[id]);
         samplers[id] = vk::Sampler::create(device, samplingMode, mipmapMode, addressMode);
     }
 
@@ -176,15 +181,83 @@ void Textures::queueUpload(uint8_t *srcPointer,
         dstTextureUploadQueueIter = uploadQueue_->emplace(dstId, std::vector<VkBufferImageCopy>{}).first;
     }
     dstTextureUploadQueueIter->second.emplace_back(region);
+
+    queuedUploadBytes_ += srcSizeInBytes;
+    if (queuedUploadBytes_ >= UPLOAD_FLUSH_THRESHOLD) { flushQueuedUploadImpl(); }
 }
 
 void Textures::performQueuedUpload() {
     std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
+    collectCompletedUploadsImpl();
+    flushQueuedUploadImpl();
+}
 
-    std::shared_ptr<vk::CommandBuffer> cmdBuffer =
-        Renderer::instance().framework()->safeAcquireCurrentContext()->uploadCommandBuffer;
+std::shared_ptr<vk::HostVisibleBuffer> Textures::acquireUploadStagingBuffer(size_t minSize) {
+    auto vma = Renderer::instance().framework()->vma();
+    auto device = Renderer::instance().framework()->device();
 
-    auto physicalDevice = Renderer::instance().framework()->physicalDevice();
+    for (auto iter = freeUploadStagingBuffers_.begin(); iter != freeUploadStagingBuffers_.end(); ++iter) {
+        if ((*iter)->size() >= minSize) {
+            auto buffer = *iter;
+            freeUploadStagingBuffers_.erase(iter);
+            return buffer;
+        }
+    }
+
+    return vk::HostVisibleBuffer::create(vma, device, minSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+}
+
+std::shared_ptr<vk::Fence> Textures::acquireUploadFence() {
+    auto device = Renderer::instance().framework()->device();
+
+    if (!freeUploadFences_.empty()) {
+        auto fence = freeUploadFences_.back();
+        freeUploadFences_.pop_back();
+        vkResetFences(device->vkDevice(), 1, &fence->vkFence());
+        return fence;
+    }
+
+    return vk::Fence::create(device);
+}
+
+void Textures::collectCompletedUploadsImpl() {
+    auto device = Renderer::instance().framework()->device();
+    auto &batches = submittedUploadBatches_;
+    for (auto iter = batches.begin(); iter != batches.end();) {
+        if (vkGetFenceStatus(device->vkDevice(), iter->fence->vkFence()) == VK_SUCCESS) {
+            freeUploadCommandBuffers_.emplace_back(iter->commandBuffer);
+            freeUploadFences_.emplace_back(iter->fence);
+            for (auto &stagingBuffer : iter->stagingBuffers) {
+                freeUploadStagingBuffers_.emplace_back(stagingBuffer);
+            }
+            iter = batches.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
+}
+
+void Textures::flushQueuedUploadImpl() {
+    if (uploadQueue_ == nullptr || uploadQueue_->empty()) {
+        queuedUploadBytes_ = 0;
+        return;
+    }
+
+    auto framework = Renderer::instance().framework();
+    auto device = framework->device();
+    auto physicalDevice = framework->physicalDevice();
+    collectCompletedUploadsImpl();
+    std::shared_ptr<vk::CommandBuffer> cmdBuffer;
+    if (!freeUploadCommandBuffers_.empty()) {
+        cmdBuffer = freeUploadCommandBuffers_.back();
+        freeUploadCommandBuffers_.pop_back();
+        cmdBuffer->reset();
+    } else {
+        cmdBuffer = vk::CommandBuffer::create(device, framework->mainCommandPool());
+    }
+    auto fence = acquireUploadFence();
+    cmdBuffer->begin();
+
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
 
     std::vector<vk::CommandBuffer::ImageMemoryBarrier> uploadPreImageBarriers, uploadPostImageBarriers;
@@ -264,6 +337,63 @@ void Textures::performQueuedUpload() {
     }
 
     cmdBuffer->barriersBufferImage({}, uploadPostImageBarriers);
+
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> stagingBuffers;
+    stagingBuffers.reserve(uploadQueue_->size());
+    for (auto &entry : *uploadQueue_) {
+        auto cacheIter = caches_.find(entry.first);
+        if (cacheIter == caches_.end()) { continue; }
+        auto cache = cacheIter->second;
+        cache->flush();
+        auto detachedBuffer = cache->detachCurrentBuffer();
+        stagingBuffers.emplace_back(detachedBuffer);
+        cache->replaceCurrentBuffer(acquireUploadStagingBuffer(detachedBuffer->size()));
+    }
+
+    cmdBuffer->end();
+    cmdBuffer->submitMainQueueIndividual(device, fence);
+
+    submittedUploadBatches_.push_back({
+        .fence = fence,
+        .commandBuffer = cmdBuffer,
+        .stagingBuffers = std::move(stagingBuffers),
+    });
+
+    framework->frameResourceRetainer().retain(uploadQueue_);
+    uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
+    queuedUploadBytes_ = 0;
+}
+
+std::shared_ptr<vk::DeviceLocalImage> Textures::texture(uint32_t id) {
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
+    auto iter = textures_.find(id);
+    return iter != textures_.end() ? iter->second : nullptr;
+}
+
+std::shared_ptr<vk::Sampler> Textures::sampler(uint32_t id) {
+    std::scoped_lock lck(mtx_, Renderer::instance().framework()->recreateMtx());
+    auto iter = samplers.find(id);
+    return iter != samplers.end() ? iter->second : nullptr;
+}
+
+std::shared_ptr<Emission> Textures::emission() {
+    if (!Renderer::options.collectChunkEmission) {
+        return nullptr;
+    }
+
+    std::scoped_lock lck(mtx_);
+    if (emission_ == nullptr) {
+        emission_ = Emission::create(std::weak_ptr<Textures>(shared_from_this()));
+    }
+    return emission_;
+}
+
+void Textures::releaseEmission() {
+    std::scoped_lock lck(mtx_);
+    if (emission_ != nullptr) {
+        emission_->reset();
+        emission_ = nullptr;
+    }
 }
 
 void Textures::bindAllTextures() {
@@ -310,7 +440,7 @@ size_t ImageBufferCache::append(void *src, size_t size) {
         std::memcpy(newCache->mappedPtr(), caches_[current_]->mappedPtr(), bases_[current_]);
 
         auto framework = Renderer::instance().framework();
-        framework->gc().collect(caches_[current_]);
+        framework->frameResourceRetainer().retain(caches_[current_]);
         caches_[current_] = newCache;
         capacities_[current_] = newCapacity;
     }
@@ -331,5 +461,19 @@ VkBuffer &ImageBufferCache::vkBuffer() {
 
 void ImageBufferCache::reset() {
     current_ = (current_ + 1) % caches_.size();
+    bases_[current_] = 0;
+}
+
+std::shared_ptr<vk::HostVisibleBuffer> ImageBufferCache::detachCurrentBuffer() {
+    auto detached = caches_[current_];
+    caches_[current_] = nullptr;
+    capacities_[current_] = 0;
+    bases_[current_] = 0;
+    return detached;
+}
+
+void ImageBufferCache::replaceCurrentBuffer(std::shared_ptr<vk::HostVisibleBuffer> buffer) {
+    caches_[current_] = std::move(buffer);
+    capacities_[current_] = caches_[current_]->size();
     bases_[current_] = 0;
 }

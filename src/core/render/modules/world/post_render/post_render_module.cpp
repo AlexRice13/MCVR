@@ -2,13 +2,62 @@
 
 #include "core/render/buffers.hpp"
 #include "core/render/entities.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
+#include "core/util/parallel.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 #include <limits>
 #include <random>
+#include <sstream>
+#include <string_view>
+
+using json = nlohmann::json;
+
+namespace {
+
+const RenderPass::ShaderVariant *findShaderVariant(const RenderPass &pass, std::string_view contentName) {
+    auto variantIter = pass.shaderVariants.find(std::string(contentName));
+    if (variantIter != pass.shaderVariants.end()) { return &variantIter->second; }
+
+    variantIter = pass.shaderVariants.find("default");
+    if (variantIter != pass.shaderVariants.end()) { return &variantIter->second; }
+
+    return nullptr;
+}
+
+std::string findShaderVariantName(const RenderPass &pass, std::string_view contentName) {
+    auto variantIter = pass.shaderVariants.find(std::string(contentName));
+    if (variantIter != pass.shaderVariants.end()) { return variantIter->first; }
+
+    variantIter = pass.shaderVariants.find("default");
+    if (variantIter != pass.shaderVariants.end()) { return variantIter->first; }
+
+    return "";
+}
+
+// void logShaderVariantSelectionOnce(const std::string &passName,
+//                                    std::string_view contentName,
+//                                    std::string_view variantName) {
+//     static std::mutex mutex;
+//     static std::set<std::string> loggedKeys;
+
+//     const std::string key = passName + "|" + std::string(contentName) + "|" + std::string(variantName);
+
+//     std::lock_guard<std::mutex> lock(mutex);
+//     if (!loggedKeys.insert(key).second) { return; }
+
+//     std::cerr << "[PostVariant] pass=" << passName << " content=" << contentName << " variant=" << variantName
+//               << std::endl;
+// }
+
+} // namespace
 
 PostRenderModule::PostRenderModule() {}
 
@@ -19,6 +68,9 @@ void PostRenderModule::init(std::shared_ptr<Framework> framework, std::shared_pt
 
     ldrImages_.resize(size);
     firstHitDepthImages_.resize(size);
+    hdrImages_.resize(size);
+    motionVectorImages_.resize(size);
+    normalRoughnessImages_.resize(size);
     postRenderedImages_.resize(size);
     postRenderedInitialized_.assign(size, 0);
 }
@@ -45,6 +97,36 @@ bool PostRenderModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::De
     } else {
         if (images[1]->width() != width_ || images[1]->height() != height_) return false;
         firstHitDepthImages_[frameIndex] = images[1];
+    }
+
+    if (images[2] == nullptr) {
+        hdrImages_[frameIndex] = images[2] = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, width_, height_, 1, formats[2],
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    } else {
+        if (images[2]->width() != width_ || images[2]->height() != height_) return false;
+        hdrImages_[frameIndex] = images[2];
+    }
+
+    if (images[3] == nullptr) {
+        motionVectorImages_[frameIndex] = images[3] = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, width_, height_, 1, formats[3],
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    } else {
+        if (images[3]->width() != width_ || images[3]->height() != height_) return false;
+        motionVectorImages_[frameIndex] = images[3];
+    }
+
+    if (images[4] == nullptr) {
+        normalRoughnessImages_[frameIndex] = images[4] = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, width_, height_, 1, formats[4],
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    } else {
+        if (images[4]->width() != width_ || images[4]->height() != height_) return false;
+        normalRoughnessImages_[frameIndex] = images[4];
     }
 
     return true;
@@ -95,17 +177,75 @@ void PostRenderModule::setAttributes(int attributeCount, std::vector<std::string
     if (starSizeMin_ > starSizeMax_) { std::swap(starSizeMin_, starSizeMax_); }
 }
 
+void PostRenderModule::initExecutionVariables() {
+    executionVariableConfigs_.clear();
+    globalVariables_.clear();
+
+    if (shaderPack_ == nullptr) { return; }
+    shaderPack_->copyStageExecutionState(ShaderPackLoader::Stage::PostRender, executionVariableConfigs_,
+                                         globalVariables_);
+}
+
 void PostRenderModule::build() {
+#ifdef DEBUG
+    using clock = std::chrono::steady_clock;
+    using ms = std::chrono::duration<double, std::milli>;
+    auto t0 = clock::now();
+    auto printStep = [&t0](const char *label) {
+        auto now = clock::now();
+        std::cerr << "[PostRender build] " << label << ": " << ms(now - t0).count() << " ms" << std::endl;
+        t0 = now;
+    };
+
+    std::cerr << "[PostRender build] ====== start ======" << std::endl;
+#endif
+
     auto framework = framework_.lock();
     auto worldPipeline = worldPipeline_.lock();
     uint32_t size = framework->swapchain()->imageCount();
+#ifdef DEBUG
+    printStep("lock framework");
+#endif
+
+    shaderPack_ = worldPipeline != nullptr ? worldPipeline->shaderPack() : nullptr;
+#ifdef DEBUG
+    printStep("loadShaderPack");
+#endif
+
+    initExecutionVariables();
+#ifdef DEBUG
+    printStep("initExecutionVariables");
+#endif
 
     initDescriptorTables();
+#ifdef DEBUG
+    printStep("initDescriptorTables");
+#endif
+
     initImages();
+#ifdef DEBUG
+    printStep("initImages");
+#endif
+
     initBuffers();
+#ifdef DEBUG
+    printStep("initBuffers");
+#endif
+
     initRenderPass();
+#ifdef DEBUG
+    printStep("initRenderPass");
+#endif
+
     initFrameBuffers();
+#ifdef DEBUG
+    printStep("initFrameBuffers");
+#endif
+
     initPipeline();
+#ifdef DEBUG
+    printStep("initPipeline");
+#endif
 
     contexts_.resize(size);
 
@@ -113,6 +253,16 @@ void PostRenderModule::build() {
         contexts_[i] =
             PostRenderModuleContext::create(framework->contexts()[i], worldPipeline->contexts()[i], shared_from_this());
     }
+#ifdef DEBUG
+    printStep("initContexts");
+#endif
+
+    ensureDynamicPipelines();
+#ifdef DEBUG
+    printStep("ensureDynamicPipelines");
+
+    std::cerr << "[PostRender build] ====== done ======" << std::endl;
+#endif
 }
 
 std::vector<std::shared_ptr<WorldModuleContext>> &PostRenderModule::contexts() {
@@ -132,75 +282,171 @@ void PostRenderModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
     }
 }
 
-void PostRenderModule::preClose() {}
+void PostRenderModule::preClose() {
+    fullScreenPasses_.clear();
+    passNameToPass_.clear();
+    renderPasses_.clear();
+    renderPassNameToPass_.clear();
+    executionVariableConfigs_.clear();
+    globalVariables_.clear();
+    shaderPack_ = nullptr;
+    isDynamicPipelinesReady_ = false;
+}
+
+RenderPass::Target PostRenderModule::parseRenderContent(const std::string &content) {
+    const std::string lower = ShaderPackLoader::toLower(content);
+    if (lower == "weather") { return RenderPass::Target::Weather; }
+    if (lower == "particle" || lower == "particles") { return RenderPass::Target::Particle; }
+    if (lower == "text") { return RenderPass::Target::Text; }
+    if (lower == "name_tag" || lower == "nametag" || lower == "name-tag") { return RenderPass::Target::NameTag; }
+    if (lower == "star" || lower == "stars") { return RenderPass::Target::Star; }
+    throw std::runtime_error("unsupported post_render render content: " + content);
+}
+
+int PostRenderModule::renderTargetPostFlag(RenderPass::Target target) {
+    switch (target) {
+        case RenderPass::Target::Weather:
+            return weatherPostFlag;
+        case RenderPass::Target::Particle:
+            return particlePostFlag;
+        case RenderPass::Target::Text:
+            return textPostFlag;
+        case RenderPass::Target::NameTag:
+            return nameTagPostFlag;
+        case RenderPass::Target::Star:
+            return 0;
+    }
+    return 0;
+}
+
+bool PostRenderModule::renderTargetDefaultDepthWrite(RenderPass::Target target) {
+    return target == RenderPass::Target::Text || target == RenderPass::Target::NameTag ||
+           target == RenderPass::Target::Star;
+}
+
+VkCompareOp PostRenderModule::parseDepthCompare(const std::string &value) {
+    const std::string lower = ShaderPackLoader::toLower(value);
+    if (lower == "never") { return VK_COMPARE_OP_NEVER; }
+    if (lower == "less") { return VK_COMPARE_OP_LESS; }
+    if (lower == "equal") { return VK_COMPARE_OP_EQUAL; }
+    if (lower == "less_or_equal" || lower == "lequal") { return VK_COMPARE_OP_LESS_OR_EQUAL; }
+    if (lower == "greater") { return VK_COMPARE_OP_GREATER; }
+    if (lower == "not_equal") { return VK_COMPARE_OP_NOT_EQUAL; }
+    if (lower == "greater_or_equal" || lower == "gequal") { return VK_COMPARE_OP_GREATER_OR_EQUAL; }
+    if (lower == "always") { return VK_COMPARE_OP_ALWAYS; }
+    throw std::runtime_error("unsupported post_render depth_compare: " + value);
+}
 
 void PostRenderModule::initDescriptorTables() {
     auto framework = framework_.lock();
     uint32_t size = framework->swapchain()->imageCount();
-
     descriptorTables_.resize(size);
     samplers_.resize(size);
+    postPassColorSamplers_.resize(size);
+    postPassDepthSamplers_.resize(size);
 
     for (int i = 0; i < size; i++) {
-        descriptorTables_[i] = vk::DescriptorTableBuilder{}
-                                   .beginDescriptorLayoutSet() // set 0
-                                   .beginDescriptorLayoutSetBinding()
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 0,
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                       .descriptorCount = 4096, // a very big number
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 1, // light map
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 2, // first hit depth
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .endDescriptorLayoutSetBinding()
-                                   .endDescriptorLayoutSet()
-                                   .beginDescriptorLayoutSet() // set 1
-                                   .beginDescriptorLayoutSetBinding()
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 0, // binding 0: current world ubo
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 1, // binding 1: sky ubo
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 2, // binding 2: light map ubo
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .endDescriptorLayoutSetBinding()
-                                   .endDescriptorLayoutSet()
-                                   .beginDescriptorLayoutSet() // set 2
-                                   .beginDescriptorLayoutSetBinding()
-                                   .defineDescriptorLayoutSetBinding({
-                                       .binding = 0, // binding 0: mapping
-                                       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                       .descriptorCount = 1,
-                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   })
-                                   .endDescriptorLayoutSetBinding()
-                                   .endDescriptorLayoutSet()
-                                   .build(framework->device());
+        vk::DescriptorTableBuilder builder;
+        builder.beginDescriptorLayoutSet() // set 0
+            .beginDescriptorLayoutSetBinding()
+            .defineDescriptorLayoutSetBinding({
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 4096,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 2,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .endDescriptorLayoutSetBinding()
+            .endDescriptorLayoutSet()
+            .beginDescriptorLayoutSet() // set 1
+            .beginDescriptorLayoutSetBinding()
+            .defineDescriptorLayoutSetBinding({
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .endDescriptorLayoutSetBinding()
+            .endDescriptorLayoutSet()
+            .beginDescriptorLayoutSet() // set 2
+            .beginDescriptorLayoutSetBinding()
+            .defineDescriptorLayoutSetBinding({
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .endDescriptorLayoutSetBinding()
+            .endDescriptorLayoutSet()
+            .beginDescriptorLayoutSet() // set 3
+            .beginDescriptorLayoutSetBinding()
+            .defineDescriptorLayoutSetBinding({
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 2,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 3,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 4,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            })
+            .endDescriptorLayoutSetBinding()
+            .endDescriptorLayoutSet();
+
+        if (shaderPack_ != nullptr) {
+            shaderPack_->defineRuntimeResourceDescriptorSet(builder,
+                                                            VK_SHADER_STAGE_VERTEX_BIT |
+                                                                VK_SHADER_STAGE_FRAGMENT_BIT,
+                                                            VK_SHADER_STAGE_VERTEX_BIT |
+                                                                VK_SHADER_STAGE_FRAGMENT_BIT,
+                                                            VK_SHADER_STAGE_VERTEX_BIT |
+                                                                VK_SHADER_STAGE_FRAGMENT_BIT);
+            shaderPack_->defineExecutionDescriptorSet(builder, ShaderPackLoader::Stage::PostRender,
+                                                      VK_SHADER_STAGE_VERTEX_BIT |
+                                                          VK_SHADER_STAGE_FRAGMENT_BIT);
+        }
+
+        descriptorTables_[i] = builder.build(framework->device());
 
         samplers_[i] = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
                                            VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        postPassColorSamplers_[i] =
+            vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        postPassDepthSamplers_[i] =
+            vk::Sampler::create(framework->device(), VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     }
 }
 
@@ -210,19 +456,27 @@ void PostRenderModule::initImages() {
     auto vma = framework->vma();
     uint32_t size = framework->swapchain()->imageCount();
 
-    worldLightMapImages_.resize(size);
     worldPostDepthImages_.resize(size);
 
     for (int i = 0; i < size; i++) {
-        worldLightMapImages_[i] =
-            vk::DeviceLocalImage::create(device, vma, false, 16, 16, 1, VK_FORMAT_R8G8B8A8_UNORM,
-                                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-        descriptorTables_[i]->bindSamplerImageForShader(samplers_[i], worldLightMapImages_[i], 0, 1);
-
         descriptorTables_[i]->bindImage(firstHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        descriptorTables_[i]->bindSamplerImage(postPassColorSamplers_[i], postRenderedImages_[i],
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 3, 0, 0);
+        descriptorTables_[i]->bindSamplerImage(postPassDepthSamplers_[i], firstHitDepthImages_[i],
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 3, 1, 0);
+        descriptorTables_[i]->bindSamplerImage(postPassColorSamplers_[i], hdrImages_[i],
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 3, 2, 0);
+        descriptorTables_[i]->bindSamplerImage(postPassColorSamplers_[i], motionVectorImages_[i],
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 3, 3, 0);
+        descriptorTables_[i]->bindSamplerImage(postPassColorSamplers_[i], normalRoughnessImages_[i],
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 3, 4, 0);
 
         worldPostDepthImages_[i] = vk::DeviceLocalImage::create(
             device, vma, false, width_, height_, 1, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+
+        if (shaderPack_ != nullptr && shaderPack_->hasRuntimeResources() && shaderPack_->runtimeResourcesReady()) {
+            shaderPack_->bindRuntimeResources(descriptorTables_[i], 4, i);
+        }
     }
 }
 
@@ -355,34 +609,6 @@ void PostRenderModule::initBuffers() {
 
 void PostRenderModule::initRenderPass() {
     auto device = framework_.lock()->device();
-    worldLightMapRenderPass_ = vk::RenderPassBuilder{}
-                                   .beginAttachmentDescription()
-                                   .defineAttachmentDescription({
-                                       // color
-                                       .format = worldLightMapImages_[0]->vkFormat(),
-                                       .samples = VK_SAMPLE_COUNT_1_BIT,
-                                       .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                                       .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                       .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                   })
-                                   .endAttachmentDescription()
-                                   .beginAttachmentReference()
-                                   .defineAttachmentReference({
-                                       .attachment = 0,
-                                       .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                   })
-                                   .endAttachmentReference()
-                                   .beginSubpassDescription()
-                                   .defineSubpassDescription({
-                                       .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                       .colorAttachmentIndices = {0},
-                                   })
-                                   .endSubpassDescription()
-                                   .build(device);
-
     worldPostColorToDepthRenderPass_ = vk::RenderPassBuilder{}
                                            .beginAttachmentDescription()
                                            .defineAttachmentDescription({
@@ -411,54 +637,6 @@ void PostRenderModule::initRenderPass() {
                                            })
                                            .endSubpassDescription()
                                            .build(device);
-
-    worldPostRenderPass_ = vk::RenderPassBuilder{}
-                               .beginAttachmentDescription()
-                               .defineAttachmentDescription({
-                                   .format = postRenderedImages_[0]->vkFormat(),
-                                   .samples = VK_SAMPLE_COUNT_1_BIT,
-                                   .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-                                   .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                   .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                   .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-#ifdef USE_AMD
-                                   .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                   .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                                   .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                   .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
-                               })
-                               .defineAttachmentDescription({
-                                   // depth
-                                   .format = worldPostDepthImages_[0]->vkFormat(),
-                                   .samples = VK_SAMPLE_COUNT_1_BIT,
-                                   .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-                                   .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                   .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-                                   .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                   .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                   .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                               })
-                               .endAttachmentDescription()
-                               .beginAttachmentReference()
-                               .defineAttachmentReference({
-                                   .attachment = 0,
-                                   .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                               })
-                               .defineAttachmentReference({
-                                   .attachment = 1,
-                                   .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                               })
-                               .endAttachmentReference()
-                               .beginSubpassDescription()
-                               .defineSubpassDescription({
-                                   .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                   .colorAttachmentIndices = {0},
-                                   .depthStencilAttachmentIndex = 1,
-                               })
-                               .endSubpassDescription()
-                               .build(device);
 }
 
 void PostRenderModule::initFrameBuffers() {
@@ -466,29 +644,14 @@ void PostRenderModule::initFrameBuffers() {
     auto device = framework->device();
     uint32_t size = framework->swapchain()->imageCount();
 
-    worldLightMapFramebuffers_.resize(size);
     worldPostColorToDepthFramebuffers_.resize(size);
-    worldPostFramebuffers_.resize(size);
 
     for (int i = 0; i < size; i++) {
-        worldLightMapFramebuffers_[i] = vk::FramebufferBuilder{}
-                                            .beginAttachment()
-                                            .defineAttachment(worldLightMapImages_[i])
-                                            .endAttachment()
-                                            .build(device, worldLightMapRenderPass_);
-
         worldPostColorToDepthFramebuffers_[i] = vk::FramebufferBuilder{}
                                                     .beginAttachment()
                                                     .defineAttachment(worldPostDepthImages_[i])
                                                     .endAttachment()
                                                     .build(device, worldPostColorToDepthRenderPass_);
-
-        worldPostFramebuffers_[i] = vk::FramebufferBuilder{}
-                                        .beginAttachment()
-                                        .defineAttachment(postRenderedImages_[i])
-                                        .defineAttachment(worldPostDepthImages_[i])
-                                        .endAttachment()
-                                        .build(device, worldPostRenderPass_);
     }
 }
 
@@ -496,44 +659,7 @@ void PostRenderModule::initPipeline() {
     auto framework = framework_.lock();
     auto device = framework->device();
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
-
-    worldLightMapVertShader_ =
-        vk::Shader::create(device, (shaderPath / "world/post_render/light_map_vert.spv").string());
-    worldLightMapFragShader_ =
-        vk::Shader::create(device, (shaderPath / "world/post_render/light_map_frag.spv").string());
-
-    worldLightMapPipeline_ = vk::GraphicsPipelineBuilder{}
-                                 .defineRenderPass(worldLightMapRenderPass_, 0)
-                                 .beginShaderStage()
-                                 .defineShaderStage(worldLightMapVertShader_, VK_SHADER_STAGE_VERTEX_BIT)
-                                 .defineShaderStage(worldLightMapFragShader_, VK_SHADER_STAGE_FRAGMENT_BIT)
-                                 .endShaderStage()
-                                 .defineVertexInputState<void>()
-                                 .defineViewportScissorState({
-                                     .viewport =
-                                         {
-                                             .x = 0,
-                                             .y = 0,
-                                             .width = static_cast<float>(worldLightMapImages_[0]->width()),
-                                             .height = static_cast<float>(worldLightMapImages_[0]->height()),
-                                             .minDepth = 0.0,
-                                             .maxDepth = 1.0,
-                                         },
-                                     .scissor =
-                                         {
-                                             .offset = {.x = 0, .y = 0},
-                                             .extent =
-                                                 {
-                                                     .width = worldLightMapImages_[0]->width(),
-                                                     .height = worldLightMapImages_[0]->height(),
-                                                 },
-                                         },
-                                 })
-                                 .beginColorBlendAttachmentState()
-                                 .defineDefaultColorBlendAttachmentState() // color
-                                 .endColorBlendAttachmentState()
-                                 .definePipelineLayout(descriptorTables_[0])
-                                 .build(device);
+    fullScreenVertexShader_ = vk::Shader::create(device, (shaderPath / "full_screen_vert.spv").string());
 
     worldPostColorToDepthVertShader_ =
         vk::Shader::create(device, (shaderPath / "world/post_render/color_to_depth_vert.spv").string());
@@ -581,136 +707,675 @@ void PostRenderModule::initPipeline() {
             .endColorBlendAttachmentState()
             .definePipelineLayout(descriptorTables_[0])
             .build(device);
+}
 
-    VkPipelineColorBlendAttachmentState postColorBlendAttachmentState{
-        .blendEnable = VK_TRUE,
-        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-        .colorBlendOp = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-        .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+std::vector<ExpressionEvaluator::Variable> PostRenderModule::executionExpressionVariables() const {
+    return {
+        {.name = "RENDER_WIDTH", .value = static_cast<double>(width_)},
+        {.name = "RENDER_HEIGHT", .value = static_cast<double>(height_)},
+    };
+}
+
+double PostRenderModule::evaluateNumericExpression(const std::string &expression,
+                                                   const PostRenderModule::ExecutionVariables &variables) {
+    return shaderPack_->evaluateNumericExpression(ShaderPackLoader::Stage::PostRender, expression, variables,
+                                                  executionExpressionVariables(), true);
+}
+
+std::optional<std::reference_wrapper<ShaderPackLoader::VariableConfig>>
+PostRenderModule::findExecutionVariableConfig(std::string_view name) {
+    auto executionIter = executionVariableConfigs_.find(std::string(name));
+    if (executionIter != executionVariableConfigs_.end()) { return std::ref(executionIter->second); }
+    return std::nullopt;
+}
+
+void PostRenderModule::uploadExecutionBuffer(
+    const std::shared_ptr<vk::DeviceLocalBuffer> &executionBuffer,
+    PostRenderModuleContext &context,
+    const std::unordered_map<std::string, ExecutionVariable> &variables) {
+    auto frameworkContext = context.frameworkContext.lock();
+    auto framework = frameworkContext->framework.lock();
+    shaderPack_->uploadExecutionBuffer(ShaderPackLoader::Stage::PostRender, executionBuffer, variables,
+                                       frameworkContext->worldCommandBuffer, context.descriptorTable,
+                                       shaderPack_->executionSet(4u), framework->physicalDevice()->mainQueueIndex(),
+                                       VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+}
+
+std::shared_ptr<vk::DeviceLocalImage> PostRenderModule::findBuiltInImage(const std::string &name, uint32_t frameIndex) {
+    if (name == TARGET_LDR) { return postRenderedImages_[frameIndex]; }
+    if (name == TARGET_FIRST_HIT_DEPTH) { return firstHitDepthImages_[frameIndex]; }
+    if (name == TARGET_HDR) { return hdrImages_[frameIndex]; }
+    if (name == TARGET_MOTION_VECTOR) { return motionVectorImages_[frameIndex]; }
+    if (name == TARGET_NORMAL_ROUGHNESS) { return normalRoughnessImages_[frameIndex]; }
+    return nullptr;
+}
+
+std::shared_ptr<vk::DeviceLocalImage> PostRenderModule::findTargetImage(const std::string &target, uint32_t frameIndex) {
+    if (target == TARGET_LDR) { return postRenderedImages_[frameIndex]; }
+    if (target == TARGET_FIRST_HIT_DEPTH) { return firstHitDepthImages_[frameIndex]; }
+
+    if (shaderPack_ != nullptr) {
+        if (auto runtimeTexture = shaderPack_->findRuntimeTexture(target); runtimeTexture.has_value()) {
+            if (runtimeTexture->get().config.imported) { return nullptr; }
+            return shaderPack_->findRuntimeVKTexture(runtimeTexture->get(), frameIndex);
+        }
+    }
+    return nullptr;
+}
+
+void PostRenderModule::ensureDynamicPipelines() {
+    if (isDynamicPipelinesReady_) { return; }
+    if (shaderPack_ == nullptr || !shaderPack_->runtimeResourcesReady()) { return; }
+
+#ifdef DEBUG
+    using clock = std::chrono::steady_clock;
+    using ms = std::chrono::duration<double, std::milli>;
+    auto tPhase = clock::now();
+    auto printPhase = [&tPhase](const char *label) {
+        auto now = clock::now();
+        std::cerr << "[PostRender ensureDynamicPipelines] " << label << ": "
+                  << ms(now - tPhase).count() << " ms" << std::endl;
+        tPhase = now;
+    };
+#endif
+
+    auto framework = framework_.lock();
+    auto device = framework->device();
+    uint32_t frameCount = framework->swapchain()->imageCount();
+    const auto &shaderPack = shaderPack_->shaderPack();
+    const uint32_t executionSet = shaderPack_->executionSet(4u);
+    const size_t executionBufferSize = shaderPack.postRenderExecution.variables.size() * sizeof(float);
+
+    fullScreenPasses_.clear();
+    passNameToPass_.clear();
+    renderPasses_.clear();
+    renderPassNameToPass_.clear();
+    for (uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
+        if (shaderPack_->hasRuntimeResources()) {
+            shaderPack_->bindRuntimeResources(descriptorTables_[frameIndex], 4, frameIndex);
+        }
+    }
+
+    struct ShaderAssignment {
+        enum class Type {
+            FullScreenFragment,
+            RenderVertex,
+            RenderFragment,
+        };
+        Type type;
+        size_t index;
+        std::string variantName;
     };
 
-    worldPostVertShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_vert.spv").string());
-    worldPostFragShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_frag.spv").string());
+    std::vector<ShaderPack::ShaderCreateInfo> shaderRequests;
+    std::vector<ShaderAssignment> shaderAssignments;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> fullScreenTargetImages;
 
-    worldPostPipeline_ = vk::GraphicsPipelineBuilder{}
-                             .defineRenderPass(worldPostRenderPass_, 0)
-                             .beginShaderStage()
-                             .defineShaderStage(worldPostVertShader_, VK_SHADER_STAGE_VERTEX_BIT)
-                             .defineShaderStage(worldPostFragShader_, VK_SHADER_STAGE_FRAGMENT_BIT)
-                             .endShaderStage()
-                             .defineVertexInputState<vk::VertexFormat::PBRVertex>()
-                             .defineViewportScissorState({
-                                 .viewport =
-                                     {
-                                         .x = 0,
-                                         .y = 0,
-                                         .width = static_cast<float>(worldPostDepthImages_[0]->width()),
-                                         .height = static_cast<float>(worldPostDepthImages_[0]->height()),
-                                         .minDepth = 0.0,
-                                         .maxDepth = 1.0,
-                                     },
-                                 .scissor =
-                                     {
-                                         .offset = {.x = 0, .y = 0},
-                                         .extent =
-                                             {
-                                                 .width = worldPostDepthImages_[0]->width(),
-                                                 .height = worldPostDepthImages_[0]->height(),
-                                             },
-                                     },
-                             })
-                             .defineDepthStencilState({
-                                 .depthTestEnable = VK_TRUE,
-                                 .depthWriteEnable = VK_TRUE,
-                                 .depthCompareOp = VK_COMPARE_OP_LESS,
-                                 .depthBoundsTestEnable = VK_FALSE,
-                                 .stencilTestEnable = VK_FALSE,
-                                 .minDepthBounds = 0.0,
-                                 .maxDepthBounds = 1.0,
-                             })
-                             .defineRasterizationState(VkPipelineRasterizationStateCreateInfo{
-                                 .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                 .depthClampEnable = VK_FALSE,
-                                 .rasterizerDiscardEnable = VK_FALSE,
-                                 .polygonMode = VK_POLYGON_MODE_FILL,
-                                 .cullMode = VK_CULL_MODE_NONE,
-                                 .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-                                 .depthBiasEnable = VK_FALSE,
-                                 .depthBiasConstantFactor = 0.0f,
-                                 .depthBiasClamp = 0.0f,
-                                 .depthBiasSlopeFactor = 0.0f,
-                                 .lineWidth = 1.0f,
-                             })
-                             .beginColorBlendAttachmentState()
-                             .defineColorBlendAttachmentState(postColorBlendAttachmentState)
-                             .endColorBlendAttachmentState()
-                             .definePipelineLayout(descriptorTables_[0])
-                             .build(device);
+    auto hasOutputImage = [](const ShaderPackLoader::ResourceList &resources, std::string_view name) {
+        return std::find(resources.images.begin(), resources.images.end(), std::string(name)) !=
+               resources.images.end();
+    };
 
-    worldPostStarFieldVertShader_ =
-        vk::Shader::create(device, (shaderPath / "world/post_render/world_post_star_vert.spv").string());
-    worldPostStarFieldFragShader_ =
-        vk::Shader::create(device, (shaderPath / "world/post_render/world_post_star_frag.spv").string());
+    auto colorBlendAttachment = [](bool enableBlend) {
+        VkPipelineColorBlendAttachmentState state{
+            .blendEnable = enableBlend ? VK_TRUE : VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                              VK_COLOR_COMPONENT_A_BIT,
+        };
+        if (!enableBlend) {
+            state.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            state.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        }
+        return state;
+    };
 
-    worldPostStarFieldPipeline_ = vk::GraphicsPipelineBuilder{}
-                                      .defineRenderPass(worldPostRenderPass_, 0)
-                                      .beginShaderStage()
-                                      .defineShaderStage(worldPostStarFieldVertShader_, VK_SHADER_STAGE_VERTEX_BIT)
-                                      .defineShaderStage(worldPostStarFieldFragShader_, VK_SHADER_STAGE_FRAGMENT_BIT)
-                                      .endShaderStage()
-                                      .defineVertexInputState<vk::VertexFormat::PBRVertex>()
-                                      .defineViewportScissorState({
-                                          .viewport =
-                                              {
-                                                  .x = 0,
-                                                  .y = 0,
-                                                  .width = static_cast<float>(worldPostDepthImages_[0]->width()),
-                                                  .height = static_cast<float>(worldPostDepthImages_[0]->height()),
-                                                  .minDepth = 0.0,
-                                                  .maxDepth = 1.0,
-                                              },
-                                          .scissor =
-                                              {
-                                                  .offset = {.x = 0, .y = 0},
-                                                  .extent =
-                                                      {
-                                                          .width = worldPostDepthImages_[0]->width(),
-                                                          .height = worldPostDepthImages_[0]->height(),
-                                                      },
-                                              },
-                                      })
-                                      .defineDepthStencilState({
-                                          .depthTestEnable = VK_TRUE,
-                                          .depthWriteEnable = VK_TRUE,
-                                          .depthCompareOp = VK_COMPARE_OP_LESS,
-                                          .depthBoundsTestEnable = VK_FALSE,
-                                          .stencilTestEnable = VK_FALSE,
-                                          .minDepthBounds = 0.0,
-                                          .maxDepthBounds = 1.0,
-                                      })
-                                      .defineRasterizationState(VkPipelineRasterizationStateCreateInfo{
-                                          .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                          .depthClampEnable = VK_FALSE,
-                                          .rasterizerDiscardEnable = VK_FALSE,
-                                          .polygonMode = VK_POLYGON_MODE_FILL,
-                                          .cullMode = VK_CULL_MODE_NONE,
-                                          .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-                                          .depthBiasEnable = VK_FALSE,
-                                          .depthBiasConstantFactor = 0.0f,
-                                          .depthBiasClamp = 0.0f,
-                                          .depthBiasSlopeFactor = 0.0f,
-                                          .lineWidth = 1.0f,
-                                      })
-                                      .beginColorBlendAttachmentState()
-                                      .defineColorBlendAttachmentState(postColorBlendAttachmentState)
-                                      .endColorBlendAttachmentState()
-                                      .definePipelineLayout(descriptorTables_[0])
-                                      .build(device);
+    auto firstHitDepthBlendAttachment = []() {
+        return VkPipelineColorBlendAttachmentState{
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT,
+        };
+    };
+
+    for (const auto &passConfig : shaderPack.passes) {
+        if (passConfig.stage != ShaderPackLoader::Stage::PostRender) { continue; }
+#ifdef DEBUG
+        auto tPass = clock::now();
+#endif
+
+        switch (passConfig.type) {
+            case ShaderPackLoader::PassConfig::Type::FullScreen: {
+                if (passConfig.fullScreen.outputs.images.size() != 1 ||
+                    passConfig.fullScreen.outputs.images[0] != passConfig.fullScreen.target) {
+                    throw std::runtime_error("post_render full_screen pass must only write to its target: " +
+                                             passConfig.fullScreen.name);
+                }
+
+                auto targetImage = findTargetImage(passConfig.fullScreen.target, 0);
+                if (targetImage == nullptr) {
+                    throw std::runtime_error("invalid post_render target: " + passConfig.fullScreen.target);
+                }
+                uint32_t targetViewIndex = 0;
+                if (targetImage->layer() > 1) {
+                    if (!passConfig.fullScreen.layer.has_value()) {
+                        throw std::runtime_error("post_render full_screen array target requires layer: " +
+                                                 passConfig.fullScreen.name);
+                    }
+                    if (*passConfig.fullScreen.layer >= targetImage->layer()) {
+                        throw std::runtime_error("post_render full_screen layer out of range: " +
+                                                 passConfig.fullScreen.name);
+                    }
+                    targetViewIndex = *passConfig.fullScreen.layer + 1;
+                }
+
+                auto pass = std::make_shared<FullScreenPass>();
+                pass->config = passConfig.fullScreen;
+                if (executionBufferSize > 0) {
+                    pass->executionBuffer =
+                        ShaderPack::createPassExecutionBuffer(device, framework->vma(), executionBufferSize);
+                }
+                pass->renderPass = vk::RenderPassBuilder{}
+                                       .beginAttachmentDescription()
+                                       .defineAttachmentDescription({
+                                           .format = targetImage->vkFormat(),
+                                           .samples = VK_SAMPLE_COUNT_1_BIT,
+                                           .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                           .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                           .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                           .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                           .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       })
+                                       .endAttachmentDescription()
+                                       .beginAttachmentReference()
+                                       .defineAttachmentReference({
+                                           .attachment = 0,
+                                           .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       })
+                                       .endAttachmentReference()
+                                       .beginSubpassDescription()
+                                       .defineSubpassDescription({
+                                           .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                           .colorAttachmentIndices = {0},
+                                       })
+                                       .endSubpassDescription()
+                                       .build(device);
+                pass->framebuffers.resize(frameCount);
+                for (uint32_t frameIndex = 0; frameIndex < frameCount; frameIndex++) {
+                    pass->framebuffers[frameIndex].push_back(
+                        vk::FramebufferBuilder{}
+                            .beginAttachment()
+                            .defineAttachment(findTargetImage(pass->config.target, frameIndex),
+                                              targetViewIndex)
+                            .endAttachment()
+                            .build(device, pass->renderPass));
+                }
+                shaderAssignments.push_back({ShaderAssignment::Type::FullScreenFragment, fullScreenPasses_.size()});
+                shaderRequests.push_back({
+                    .path = pass->config.fragmentShaderPath,
+                    .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .definitions = pass->config.definitions,
+                    .executionStage = ShaderPackLoader::Stage::PostRender,
+                    .executionSet = executionSet,
+                });
+                fullScreenTargetImages.push_back(targetImage);
+                fullScreenPasses_.push_back(pass);
+                break;
+            }
+            case ShaderPackLoader::PassConfig::Type::Render: {
+                if (!hasOutputImage(passConfig.render.outputs, TARGET_LDR)) {
+                    throw std::runtime_error("post_render render pass must output out:ldr: " +
+                                             passConfig.render.name);
+                }
+                for (const auto &output : passConfig.render.outputs.images) {
+                    if (output != TARGET_LDR && output != TARGET_FIRST_HIT_DEPTH) {
+                        throw std::runtime_error("post_render render pass only supports out:ldr and "
+                                                 "out:first_hit_depth outputs: " +
+                                                 passConfig.render.name);
+                    }
+                }
+
+                auto pass = std::make_shared<RenderPass>();
+                pass->config = passConfig.render;
+                pass->target = parseRenderContent(pass->config.content);
+                pass->writesFirstHitDepth = hasOutputImage(pass->config.outputs, TARGET_FIRST_HIT_DEPTH);
+                if (executionBufferSize > 0) {
+                    pass->executionBuffer =
+                        ShaderPack::createPassExecutionBuffer(device, framework->vma(), executionBufferSize);
+                }
+
+                vk::RenderPassBuilder renderPassBuilder;
+                auto &attachmentBuilder = renderPassBuilder.beginAttachmentDescription();
+                attachmentBuilder.defineAttachmentDescription({
+                    .format = postRenderedImages_[0]->vkFormat(),
+                    .samples = VK_SAMPLE_COUNT_1_BIT,
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                    .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                });
+                if (pass->writesFirstHitDepth) {
+                    attachmentBuilder.defineAttachmentDescription({
+                        .format = firstHitDepthImages_[0]->vkFormat(),
+                        .samples = VK_SAMPLE_COUNT_1_BIT,
+                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    });
+                }
+                attachmentBuilder.defineAttachmentDescription({
+                    .format = worldPostDepthImages_[0]->vkFormat(),
+                    .samples = VK_SAMPLE_COUNT_1_BIT,
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                    .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                });
+                attachmentBuilder.endAttachmentDescription();
+                auto &referenceBuilder = renderPassBuilder.beginAttachmentReference()
+                                             .defineAttachmentReference({
+                                                 .attachment = 0,
+                                                 .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                             });
+                if (pass->writesFirstHitDepth) {
+                    referenceBuilder.defineAttachmentReference({
+                        .attachment = 1,
+                        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    });
+                }
+                const uint32_t depthAttachmentIndex = pass->writesFirstHitDepth ? 2u : 1u;
+                pass->renderPass =
+                    referenceBuilder
+                        .defineAttachmentReference({
+                            .attachment = depthAttachmentIndex,
+                            .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        })
+                        .endAttachmentReference()
+                        .beginSubpassDescription()
+                        .defineSubpassDescription({
+                            .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            .colorAttachmentIndices = pass->writesFirstHitDepth ? std::vector<uint32_t>{0, 1}
+                                                                                : std::vector<uint32_t>{0},
+                            .depthStencilAttachmentIndex = depthAttachmentIndex,
+                        })
+                        .endSubpassDescription()
+                        .build(device);
+
+                pass->framebuffers.resize(frameCount);
+                for (uint32_t frameIndex = 0; frameIndex < frameCount; frameIndex++) {
+                    vk::FramebufferBuilder framebufferBuilder;
+                    auto &attachments = framebufferBuilder.beginAttachment()
+                                            .defineAttachment(postRenderedImages_[frameIndex]);
+                    if (pass->writesFirstHitDepth) {
+                        attachments.defineAttachment(firstHitDepthImages_[frameIndex]);
+                    }
+                    pass->framebuffers[frameIndex] =
+                        attachments.defineAttachment(worldPostDepthImages_[frameIndex])
+                            .endAttachment()
+                            .build(device, pass->renderPass);
+                }
+
+                for (const auto &[variantName, shaderConfig] : pass->config.shaderConfigs) {
+                    shaderAssignments.push_back({
+                        ShaderAssignment::Type::RenderVertex,
+                        renderPasses_.size(),
+                        variantName,
+                    });
+                    shaderRequests.push_back({
+                        .path = shaderConfig.vertexShaderPath,
+                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                        .definitions = pass->config.definitions,
+                        .executionStage = ShaderPackLoader::Stage::PostRender,
+                        .executionSet = executionSet,
+                    });
+                    shaderAssignments.push_back({
+                        ShaderAssignment::Type::RenderFragment,
+                        renderPasses_.size(),
+                        variantName,
+                    });
+                    shaderRequests.push_back({
+                        .path = shaderConfig.fragmentShaderPath,
+                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .definitions = pass->config.definitions,
+                        .executionStage = ShaderPackLoader::Stage::PostRender,
+                        .executionSet = executionSet,
+                    });
+                }
+                renderPasses_.push_back(pass);
+                break;
+            }
+            case ShaderPackLoader::PassConfig::Type::RayTracing:
+            case ShaderPackLoader::PassConfig::Type::Compute:
+                throw std::runtime_error("post_render stage only supports full_screen and render passes");
+        }
+
+#ifdef DEBUG
+        std::string dbgName;
+        switch (passConfig.type) {
+            case ShaderPackLoader::PassConfig::Type::FullScreen: dbgName = passConfig.fullScreen.name; break;
+            case ShaderPackLoader::PassConfig::Type::Render:     dbgName = passConfig.render.name;     break;
+            default: continue;
+        }
+        std::cerr << "[PostRender ensureDynamicPipelines]   create pass '" << dbgName << "': "
+                  << ms(clock::now() - tPass).count() << " ms" << std::endl;
+#endif
+    }
+
+#ifdef DEBUG
+    printPhase("create all passes");
+
+    printPhase("collect shader requests");
+
+    ShaderPack::ShaderBatchStats shaderStats;
+    auto shaders = shaderPack_->createShaders(device, shaderRequests, &shaderStats);
+    std::string compileInfo =
+        "build shader modules (" + std::to_string(shaderStats.requestCount) + " requests, " +
+        std::to_string(shaderStats.uniqueShaderCount) + " unique, " +
+        std::to_string(shaderStats.cacheHitCount) + " cache hits, " +
+        std::to_string(shaderStats.cacheMissCount) + " compiled";
+    if (shaderStats.cacheReadFailureCount > 0) {
+        compileInfo += ", " + std::to_string(shaderStats.cacheReadFailureCount) + " cache read failures";
+    }
+    compileInfo += ")";
+    printPhase(compileInfo.c_str());
+#else
+    auto shaders = shaderPack_->createShaders(device, shaderRequests);
+#endif
+
+    for (size_t shaderIndex = 0; shaderIndex < shaders.size(); shaderIndex++) {
+        const auto &assignment = shaderAssignments[shaderIndex];
+        switch (assignment.type) {
+            case ShaderAssignment::Type::FullScreenFragment:
+                fullScreenPasses_[assignment.index]->fragmentShaders.push_back(shaders[shaderIndex]);
+                break;
+            case ShaderAssignment::Type::RenderVertex:
+                renderPasses_[assignment.index]->shaderVariants[assignment.variantName].vertexShader =
+                    shaders[shaderIndex];
+                break;
+            case ShaderAssignment::Type::RenderFragment:
+                renderPasses_[assignment.index]->shaderVariants[assignment.variantName].fragmentShader =
+                    shaders[shaderIndex];
+                break;
+        }
+    }
+
+#ifdef DEBUG
+    std::vector<double> fullScreenBuildTimes(fullScreenPasses_.size(), 0.0);
+    mcvr::parallelFor(fullScreenPasses_.size(), [&](size_t passIndex) {
+        auto tPass = clock::now();
+        auto &pass = fullScreenPasses_[passIndex];
+        auto &targetImage = fullScreenTargetImages[passIndex];
+        std::vector<std::shared_ptr<vk::GraphicsPipeline>> pipelines;
+        pipelines.push_back(
+            vk::GraphicsPipelineBuilder{}
+                .defineRenderPass(pass->renderPass, 0)
+                .beginShaderStage()
+                .defineShaderStage(fullScreenVertexShader_, VK_SHADER_STAGE_VERTEX_BIT)
+                .defineShaderStage(pass->fragmentShaders[0], VK_SHADER_STAGE_FRAGMENT_BIT)
+                .endShaderStage()
+                .defineVertexInputState<void>()
+                .defineViewportScissorState({
+                    .viewport =
+                        {
+                            .x = 0.0f,
+                            .y = 0.0f,
+                            .width = static_cast<float>(targetImage->width()),
+                            .height = static_cast<float>(targetImage->height()),
+                            .minDepth = 0.0f,
+                            .maxDepth = 1.0f,
+                        },
+                    .scissor =
+                        {
+                            .offset = {.x = 0, .y = 0},
+                            .extent = {.width = targetImage->width(), .height = targetImage->height()},
+                        },
+                })
+                .beginColorBlendAttachmentState()
+                .defineDefaultColorBlendAttachmentState()
+                .endColorBlendAttachmentState()
+                .definePipelineLayout(descriptorTables_[0])
+                .build(device));
+        pass->pipelines = std::move(pipelines);
+        fullScreenBuildTimes[passIndex] = ms(clock::now() - tPass).count();
+    }, "MCVR_POST_PIPELINE_BUILD_THREADS");
+#else
+    mcvr::parallelFor(fullScreenPasses_.size(), [&](size_t passIndex) {
+        auto &pass = fullScreenPasses_[passIndex];
+        auto &targetImage = fullScreenTargetImages[passIndex];
+        std::vector<std::shared_ptr<vk::GraphicsPipeline>> pipelines;
+        pipelines.push_back(
+            vk::GraphicsPipelineBuilder{}
+                .defineRenderPass(pass->renderPass, 0)
+                .beginShaderStage()
+                .defineShaderStage(fullScreenVertexShader_, VK_SHADER_STAGE_VERTEX_BIT)
+                .defineShaderStage(pass->fragmentShaders[0], VK_SHADER_STAGE_FRAGMENT_BIT)
+                .endShaderStage()
+                .defineVertexInputState<void>()
+                .defineViewportScissorState({
+                    .viewport =
+                        {
+                            .x = 0.0f,
+                            .y = 0.0f,
+                            .width = static_cast<float>(targetImage->width()),
+                            .height = static_cast<float>(targetImage->height()),
+                            .minDepth = 0.0f,
+                            .maxDepth = 1.0f,
+                        },
+                    .scissor =
+                        {
+                            .offset = {.x = 0, .y = 0},
+                            .extent = {.width = targetImage->width(), .height = targetImage->height()},
+                        },
+                })
+                .beginColorBlendAttachmentState()
+                .defineDefaultColorBlendAttachmentState()
+                .endColorBlendAttachmentState()
+                .definePipelineLayout(descriptorTables_[0])
+                .build(device));
+        pass->pipelines = std::move(pipelines);
+    }, "MCVR_POST_PIPELINE_BUILD_THREADS");
+#endif
+
+#ifdef DEBUG
+    std::vector<double> renderBuildTimes(renderPasses_.size(), 0.0);
+    mcvr::parallelFor(renderPasses_.size(), [&](size_t passIndex) {
+        auto tPass = clock::now();
+        auto &pass = renderPasses_[passIndex];
+        const bool depthTest = pass->config.depthTest.value_or(true);
+        const bool depthWrite = pass->config.depthWrite.value_or(renderTargetDefaultDepthWrite(pass->target));
+        const VkCompareOp depthCompare =
+            parseDepthCompare(pass->config.depthCompare.value_or(pass->target == RenderPass::Target::NameTag ?
+                                                                     "always" :
+                                                                     "less"));
+
+        for (auto &[variantName, variant] : pass->shaderVariants) {
+            vk::GraphicsPipelineBuilder pipelineBuilder;
+            auto &colorBlendBuilder =
+                pipelineBuilder.defineRenderPass(pass->renderPass, 0)
+                    .beginShaderStage()
+                    .defineShaderStage(variant.vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
+                    .defineShaderStage(variant.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
+                    .endShaderStage()
+                    .defineVertexInputState<vk::VertexFormat::PBRVertex>()
+                    .defineViewportScissorState({
+                        .viewport =
+                            {
+                                .x = 0.0f,
+                                .y = 0.0f,
+                                .width = static_cast<float>(postRenderedImages_[0]->width()),
+                                .height = static_cast<float>(postRenderedImages_[0]->height()),
+                                .minDepth = 0.0f,
+                                .maxDepth = 1.0f,
+                            },
+                        .scissor =
+                            {
+                                .offset = {.x = 0, .y = 0},
+                                .extent = {.width = postRenderedImages_[0]->width(),
+                                           .height = postRenderedImages_[0]->height()},
+                            },
+                    })
+                    .defineDepthStencilState({
+                        .depthTestEnable = depthTest ? VK_TRUE : VK_FALSE,
+                        .depthWriteEnable = depthWrite ? VK_TRUE : VK_FALSE,
+                        .depthCompareOp = depthCompare,
+                        .depthBoundsTestEnable = VK_FALSE,
+                        .stencilTestEnable = VK_FALSE,
+                        .minDepthBounds = 0.0f,
+                        .maxDepthBounds = 1.0f,
+                    })
+                    .defineRasterizationState(VkPipelineRasterizationStateCreateInfo{
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                        .depthClampEnable = VK_FALSE,
+                        .rasterizerDiscardEnable = VK_FALSE,
+                        .polygonMode = VK_POLYGON_MODE_FILL,
+                        .cullMode = VK_CULL_MODE_NONE,
+                        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                        .depthBiasEnable = VK_FALSE,
+                        .depthBiasConstantFactor = 0.0f,
+                        .depthBiasClamp = 0.0f,
+                        .depthBiasSlopeFactor = 0.0f,
+                        .lineWidth = 1.0f,
+                    })
+                    .beginColorBlendAttachmentState()
+                    .defineColorBlendAttachmentState(colorBlendAttachment(pass->config.colorBlend));
+            if (pass->writesFirstHitDepth) {
+                colorBlendBuilder.defineColorBlendAttachmentState(firstHitDepthBlendAttachment());
+            }
+            variant.pipeline = colorBlendBuilder.endColorBlendAttachmentState()
+                                   .definePipelineLayout(descriptorTables_[0])
+                                   .build(device);
+            if (variantName == "default") { pass->pipeline = variant.pipeline; }
+        }
+        renderBuildTimes[passIndex] = ms(clock::now() - tPass).count();
+    }, "MCVR_POST_PIPELINE_BUILD_THREADS");
+#else
+    mcvr::parallelFor(renderPasses_.size(), [&](size_t passIndex) {
+        auto &pass = renderPasses_[passIndex];
+        const bool depthTest = pass->config.depthTest.value_or(true);
+        const bool depthWrite = pass->config.depthWrite.value_or(renderTargetDefaultDepthWrite(pass->target));
+        const VkCompareOp depthCompare =
+            parseDepthCompare(pass->config.depthCompare.value_or(pass->target == RenderPass::Target::NameTag ?
+                                                                     "always" :
+                                                                     "less"));
+        for (auto &[variantName, variant] : pass->shaderVariants) {
+            vk::GraphicsPipelineBuilder pipelineBuilder;
+            auto &colorBlendBuilder =
+                pipelineBuilder.defineRenderPass(pass->renderPass, 0)
+                    .beginShaderStage()
+                    .defineShaderStage(variant.vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
+                    .defineShaderStage(variant.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
+                    .endShaderStage()
+                    .defineVertexInputState<vk::VertexFormat::PBRVertex>()
+                    .defineViewportScissorState({
+                        .viewport =
+                            {
+                                .x = 0.0f,
+                                .y = 0.0f,
+                                .width = static_cast<float>(postRenderedImages_[0]->width()),
+                                .height = static_cast<float>(postRenderedImages_[0]->height()),
+                                .minDepth = 0.0f,
+                                .maxDepth = 1.0f,
+                            },
+                        .scissor =
+                            {
+                                .offset = {.x = 0, .y = 0},
+                                .extent = {.width = postRenderedImages_[0]->width(),
+                                           .height = postRenderedImages_[0]->height()},
+                            },
+                    })
+                    .defineDepthStencilState({
+                        .depthTestEnable = depthTest ? VK_TRUE : VK_FALSE,
+                        .depthWriteEnable = depthWrite ? VK_TRUE : VK_FALSE,
+                        .depthCompareOp = depthCompare,
+                        .depthBoundsTestEnable = VK_FALSE,
+                        .stencilTestEnable = VK_FALSE,
+                        .minDepthBounds = 0.0f,
+                        .maxDepthBounds = 1.0f,
+                    })
+                    .defineRasterizationState(VkPipelineRasterizationStateCreateInfo{
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                        .depthClampEnable = VK_FALSE,
+                        .rasterizerDiscardEnable = VK_FALSE,
+                        .polygonMode = VK_POLYGON_MODE_FILL,
+                        .cullMode = VK_CULL_MODE_NONE,
+                        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                        .depthBiasEnable = VK_FALSE,
+                        .depthBiasConstantFactor = 0.0f,
+                        .depthBiasClamp = 0.0f,
+                        .depthBiasSlopeFactor = 0.0f,
+                        .lineWidth = 1.0f,
+                    })
+                    .beginColorBlendAttachmentState()
+                    .defineColorBlendAttachmentState(colorBlendAttachment(pass->config.colorBlend));
+            if (pass->writesFirstHitDepth) {
+                colorBlendBuilder.defineColorBlendAttachmentState(firstHitDepthBlendAttachment());
+            }
+            variant.pipeline = colorBlendBuilder.endColorBlendAttachmentState()
+                                   .definePipelineLayout(descriptorTables_[0])
+                                   .build(device);
+            if (variantName == "default") { pass->pipeline = variant.pipeline; }
+        }
+    }, "MCVR_POST_PIPELINE_BUILD_THREADS");
+#endif
+
+#ifdef DEBUG
+    for (size_t passIndex = 0; passIndex < fullScreenPasses_.size(); passIndex++) {
+        auto &pass = fullScreenPasses_[passIndex];
+        std::cerr << "[PostRender ensureDynamicPipelines]   build full_screen pass '" << pass->config.name << "': "
+                  << fullScreenBuildTimes[passIndex] << " ms" << std::endl;
+        if (!passNameToPass_.emplace(pass->config.name, pass).second) {
+            throw std::runtime_error("duplicate post_render pass name: " + pass->config.name);
+        }
+    }
+
+    for (size_t passIndex = 0; passIndex < renderPasses_.size(); passIndex++) {
+        auto &pass = renderPasses_[passIndex];
+        std::cerr << "[PostRender ensureDynamicPipelines]   build render pass '" << pass->config.name << "': "
+                  << renderBuildTimes[passIndex] << " ms" << std::endl;
+        if (!renderPassNameToPass_.emplace(pass->config.name, pass).second ||
+            passNameToPass_.find(pass->config.name) != passNameToPass_.end()) {
+            throw std::runtime_error("duplicate post_render pass name: " + pass->config.name);
+        }
+    }
+
+    printPhase("build all passes");
+#else
+    for (size_t passIndex = 0; passIndex < fullScreenPasses_.size(); passIndex++) {
+        auto &pass = fullScreenPasses_[passIndex];
+        if (!passNameToPass_.emplace(pass->config.name, pass).second) {
+            throw std::runtime_error("duplicate post_render pass name: " + pass->config.name);
+        }
+    }
+
+    for (size_t passIndex = 0; passIndex < renderPasses_.size(); passIndex++) {
+        auto &pass = renderPasses_[passIndex];
+        if (!renderPassNameToPass_.emplace(pass->config.name, pass).second ||
+            passNameToPass_.find(pass->config.name) != passNameToPass_.end()) {
+            throw std::runtime_error("duplicate post_render pass name: " + pass->config.name);
+        }
+    }
+#endif
+
+    isDynamicPipelinesReady_ = true;
 }
 
 PostRenderModuleContext::PostRenderModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -720,13 +1385,13 @@ PostRenderModuleContext::PostRenderModuleContext(std::shared_ptr<FrameworkContex
       postRenderModule(postRenderModule),
       ldrImage(postRenderModule->ldrImages_[frameworkContext->frameIndex]),
       firstHitDepthImage(postRenderModule->firstHitDepthImages_[frameworkContext->frameIndex]),
-      worldLightMapImage(postRenderModule->worldLightMapImages_[frameworkContext->frameIndex]),
+      hdrImage(postRenderModule->hdrImages_[frameworkContext->frameIndex]),
+      motionVectorImage(postRenderModule->motionVectorImages_[frameworkContext->frameIndex]),
+      normalRoughnessImage(postRenderModule->normalRoughnessImages_[frameworkContext->frameIndex]),
       worldPostDepthImage(postRenderModule->worldPostDepthImages_[frameworkContext->frameIndex]),
       descriptorTable(postRenderModule->descriptorTables_[frameworkContext->frameIndex]),
-      worldLightMapFramebuffer(postRenderModule->worldLightMapFramebuffers_[frameworkContext->frameIndex]),
       worldPostColorToDepthFramebuffer(
           postRenderModule->worldPostColorToDepthFramebuffers_[frameworkContext->frameIndex]),
-      worldPostFramebuffer(postRenderModule->worldPostFramebuffers_[frameworkContext->frameIndex]),
       postRenderedImage(postRenderModule->postRenderedImages_[frameworkContext->frameIndex]) {}
 
 void PostRenderModuleContext::render() {
@@ -738,7 +1403,6 @@ void PostRenderModuleContext::render() {
     auto module = postRenderModule.lock();
 
     auto buffers = Renderer::instance().buffers();
-
     auto chooseSrc = [](VkImageLayout oldLayout,
                         VkPipelineStageFlags2 fallbackStage,
                         VkAccessFlags2 fallbackAccess,
@@ -753,7 +1417,6 @@ void PostRenderModuleContext::render() {
         }
     };
 
-    // Force init for postRenderedImage on first use (layout tracking can be stale)
     if (module && module->postRenderedInitialized_.size() > context->frameIndex &&
         module->postRenderedInitialized_[context->frameIndex] == 0) {
         VkImageLayout targetLayout =
@@ -812,16 +1475,12 @@ void PostRenderModuleContext::render() {
         img->imageLayout() = targetLayout;
     };
 
-    // Preflight: make sure first-use layouts are valid
     ensureLayout(postRenderedImage,
 #ifdef USE_AMD
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 #endif
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-    ensureLayout(worldLightMapImage, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     ensureLayout(firstHitDepthImage, VK_IMAGE_LAYOUT_GENERAL,
@@ -848,48 +1507,8 @@ void PostRenderModuleContext::render() {
 
     descriptorTable->bindBuffer(buffers->worldUniformBuffer(), 1, 0);
     descriptorTable->bindBuffer(buffers->skyUniformBuffer(), 1, 1);
-    descriptorTable->bindBuffer(buffers->lightMapUniformBuffer(), 1, 2);
     descriptorTable->bindBuffer(Renderer::instance().buffers()->textureMappingBuffer(), 2, 0);
 
-    // render light map
-    {
-        VkPipelineStageFlags2 srcStage = 0;
-        VkAccessFlags2 srcAccess = 0;
-        chooseSrc(worldLightMapImage->imageLayout(),
-                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  srcStage, srcAccess);
-        worldCommandBuffer->barriersBufferImage(
-            {}, {{
-                    .srcStageMask = srcStage,
-                    .srcAccessMask = srcAccess,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .oldLayout = worldLightMapImage->imageLayout(),
-                    .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                    .srcQueueFamilyIndex = mainQueueIndex,
-                    .dstQueueFamilyIndex = mainQueueIndex,
-                    .image = worldLightMapImage,
-                    .subresourceRange = vk::wholeColorSubresourceRange,
-                }});
-    }
-    worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    worldCommandBuffer->beginRenderPass({
-        .renderPass = module->worldLightMapRenderPass_,
-        .framebuffer = worldLightMapFramebuffer,
-        .renderAreaExtent = {worldLightMapImage->width(), worldLightMapImage->height()},
-        .clearValues = {},
-    });
-    worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    worldCommandBuffer->bindGraphicsPipeline(module->worldLightMapPipeline_)
-        ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
-        ->draw(3, 1)
-        ->endRenderPass();
-    worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    // cast linear depth from color to depth format
     {
         VkPipelineStageFlags2 srcStageDepth = 0;
         VkAccessFlags2 srcAccessDepth = 0;
@@ -948,7 +1567,6 @@ void PostRenderModuleContext::render() {
         ->endRenderPass();
     worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    // copy input to output
     {
         VkPipelineStageFlags2 srcStageLdr = 0;
         VkAccessFlags2 srcAccessLdr = 0;
@@ -1014,111 +1632,270 @@ void PostRenderModuleContext::render() {
     vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), ldrImage->vkImage(), ldrImage->imageLayout(),
                    postRenderedImage->vkImage(), postRenderedImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
 
-    // post render
-    {
-        VkPipelineStageFlags2 srcStagePost = 0;
-        VkAccessFlags2 srcAccessPost = 0;
-        chooseSrc(postRenderedImage->imageLayout(),
-                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  srcStagePost, srcAccessPost);
-
-        VkPipelineStageFlags2 srcStageLight = 0;
-        VkAccessFlags2 srcAccessLight = 0;
-        chooseSrc(worldLightMapImage->imageLayout(),
-                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  srcStageLight, srcAccessLight);
-
-        worldCommandBuffer->barriersBufferImage(
-            {}, {{
-                     .srcStageMask = srcStagePost,
-                     .srcAccessMask = srcAccessPost,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .oldLayout = postRenderedImage->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
-                     .srcQueueFamilyIndex = mainQueueIndex,
-                     .dstQueueFamilyIndex = mainQueueIndex,
-                     .image = postRenderedImage,
-                     .subresourceRange = vk::wholeColorSubresourceRange,
-                 },
-                 {
-                     .srcStageMask = srcStageLight,
-                     .srcAccessMask = srcAccessLight,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .oldLayout = worldLightMapImage->imageLayout(),
-                     .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     .srcQueueFamilyIndex = mainQueueIndex,
-                     .dstQueueFamilyIndex = mainQueueIndex,
-                     .image = worldLightMapImage,
-                     .subresourceRange = vk::wholeColorSubresourceRange,
-                 }});
+    module->ensureDynamicPipelines();
+    if (module->shaderPack_ != nullptr && module->shaderPack_->hasRuntimeResources()) {
+        module->shaderPack_->bindRuntimeResources(descriptorTable, 4, context->frameIndex);
     }
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
-    worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (module->isDynamicPipelinesReady_ && !module->shaderPack_->execution(ShaderPackLoader::Stage::PostRender).commands.empty()) {
+        PostRenderModule::ExecutionVariables variables;
+        variables.reserve(module->globalVariables_.size());
+        for (const auto &[name, value] : module->globalVariables_) {
+            auto config = module->findExecutionVariableConfig(name);
+            variables.emplace(name,
+                              PostRenderModule::ExecutionVariable{
+                                  .name = name,
+                                  .value = value,
+                                  .type = config.has_value() ? config->get().type : "",
+                              });
+        }
 
-    worldCommandBuffer->beginRenderPass({
-        .renderPass = module->worldPostRenderPass_,
-        .framebuffer = worldPostFramebuffer,
-        .renderAreaExtent = {worldPostDepthImage->width(), worldPostDepthImage->height()},
-        .clearValues = {},
-    });
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        auto executePass = [&](const std::string &passName, ShaderPack::ExecutionVariables &passVariables) {
+            auto frameworkContext = this->frameworkContext.lock();
+            auto framework = frameworkContext->framework.lock();
+            auto worldCommandBuffer = frameworkContext->worldCommandBuffer;
+            const uint32_t frameIndex = frameworkContext->frameIndex;
+            const uint32_t queueIndex = framework->physicalDevice()->mainQueueIndex();
 
-    std::shared_ptr<EntityPostBatch> entityPostRenderDataBatch =
-        Renderer::instance().world()->entities()->entityPostBatch();
-    if (entityPostRenderDataBatch != nullptr) {
-        worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
-            ->bindGraphicsPipeline(module->worldPostPipeline_);
+            auto addColorImageBarrier = [&](const std::shared_ptr<vk::DeviceLocalImage> &image,
+                                            VkImageLayout newLayout) {
+                if (image == nullptr) { return; }
+                VkPipelineStageFlags2 dstStage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                VkAccessFlags2 dstAccess = VK_ACCESS_2_SHADER_READ_BIT;
+                if (newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                    dstStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+                    dstAccess = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+                } else if (newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
+                           newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                    dstStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                    dstAccess = newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ? VK_ACCESS_2_TRANSFER_READ_BIT
+                                                                                  : VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                }
+                worldCommandBuffer->barriersBufferImage(
+                    {},
+                    {{
+                        .srcStageMask = image->imageLayout() == VK_IMAGE_LAYOUT_UNDEFINED ?
+                                            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT :
+                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        .srcAccessMask = image->imageLayout() == VK_IMAGE_LAYOUT_UNDEFINED ?
+                                             0 :
+                                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = dstStage,
+                        .dstAccessMask = dstAccess,
+                        .oldLayout = image->imageLayout(),
+                        .newLayout = newLayout,
+                        .srcQueueFamilyIndex = queueIndex,
+                        .dstQueueFamilyIndex = queueIndex,
+                        .image = image,
+                        .subresourceRange = vk::wholeColorSubresourceRange,
+                    }});
+                image->imageLayout() = newLayout;
+            };
 
-        for (int i = 0; i < entityPostRenderDataBatch->entities.size(); i++) {
-            auto &entity = entityPostRenderDataBatch->entities[i];
+            auto addDepthImageBarrier = [&](const std::shared_ptr<vk::DeviceLocalImage> &image,
+                                            VkImageLayout newLayout) {
+                if (image == nullptr || image->imageLayout() == newLayout) { return; }
+                worldCommandBuffer->barriersBufferImage(
+                    {},
+                    {{
+                        .srcStageMask = image->imageLayout() == VK_IMAGE_LAYOUT_UNDEFINED ?
+                                            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT :
+                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        .srcAccessMask = image->imageLayout() == VK_IMAGE_LAYOUT_UNDEFINED ?
+                                             0 :
+                                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        .oldLayout = image->imageLayout(),
+                        .newLayout = newLayout,
+                        .srcQueueFamilyIndex = queueIndex,
+                        .dstQueueFamilyIndex = queueIndex,
+                        .image = image,
+                        .subresourceRange = vk::wholeDepthSubresourceRange,
+                    }});
+                image->imageLayout() = newLayout;
+            };
 
-            for (int j = 0; j < entity->geometryCount; j++) {
-                auto &vertexBuffer = entity->vertexBuffers[j];
-                auto &indexBuffer = entity->indexBuffers[j];
+            auto prepareInputs = [&](const ShaderPackLoader::ResourceList &inputs) {
+                for (const std::string &input : inputs.images) {
+                    if (auto builtInImage = module->findBuiltInImage(input, frameIndex); builtInImage != nullptr) {
+                        addColorImageBarrier(builtInImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        continue;
+                    }
+                    auto runtimeTexture = module->shaderPack_->findRuntimeTexture(input);
+                    if (!runtimeTexture.has_value()) { throw std::runtime_error("unknown post_render input: " + input); }
+                    VkImageLayout layout =
+                        runtimeTexture->get().config.imported || !runtimeTexture->get().config.storageBinding.has_value() ?
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL :
+                            VK_IMAGE_LAYOUT_GENERAL;
+                    addColorImageBarrier(module->shaderPack_->findRuntimeVKTexture(runtimeTexture->get(), frameIndex),
+                                         layout);
+                }
+            };
 
-                worldCommandBuffer->bindVertexBuffers(vertexBuffer)
-                    ->bindIndexBuffer(indexBuffer)
-                    ->drawIndexed(entity->indices[j].size(), 1);
+            if (auto passIter = module->passNameToPass_.find(passName); passIter != module->passNameToPass_.end()) {
+                auto pass = passIter->second;
+                auto targetImage = module->findTargetImage(pass->config.target, frameIndex);
+                if (targetImage == nullptr) {
+                    throw std::runtime_error("unknown post_render target: " + pass->config.target);
+                }
+
+                prepareInputs(pass->config.inputs);
+
+                if (pass->config.target == PostRenderModule::TARGET_LDR ||
+                    pass->config.target == PostRenderModule::TARGET_FIRST_HIT_DEPTH) {
+                    addColorImageBarrier(targetImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                } else {
+                    auto runtimeTexture = module->shaderPack_->findRuntimeTexture(pass->config.target);
+                    if (!runtimeTexture.has_value() || runtimeTexture->get().config.imported) {
+                        throw std::runtime_error("invalid post_render output target: " + pass->config.target);
+                    }
+                    addColorImageBarrier(module->shaderPack_->findRuntimeVKTexture(runtimeTexture->get(), frameIndex),
+                                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                }
+
+                if (pass->executionBuffer != nullptr) {
+                    module->uploadExecutionBuffer(pass->executionBuffer, *this, passVariables);
+                }
+
+                worldCommandBuffer->beginRenderPass({
+                    .renderPass = pass->renderPass,
+                    .framebuffer = pass->framebuffers[frameIndex][0],
+                    .renderAreaExtent = {targetImage->width(), targetImage->height()},
+                    .clearValues = {},
+                });
+                targetImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                worldCommandBuffer->bindGraphicsPipeline(pass->pipelines[0])
+                    ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
+                    ->draw(3, 1)
+                    ->endRenderPass();
+                targetImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                return;
             }
+
+            auto renderPassIter = module->renderPassNameToPass_.find(passName);
+            if (renderPassIter == module->renderPassNameToPass_.end()) {
+                throw std::runtime_error("unknown post_render pass: " + passName);
+            }
+
+            auto pass = renderPassIter->second;
+            prepareInputs(pass->config.inputs);
+            addColorImageBarrier(postRenderedImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            if (pass->writesFirstHitDepth) {
+                addColorImageBarrier(firstHitDepthImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            }
+            addDepthImageBarrier(worldPostDepthImage, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+            if (pass->executionBuffer != nullptr) {
+                module->uploadExecutionBuffer(pass->executionBuffer, *this, passVariables);
+            }
+
+            bool hasWork = false;
+            if (pass->target == RenderPass::Target::Star) {
+                hasWork = module->starFieldVertexBuffer != nullptr && module->starFieldVertexBuffer->size() > 0;
+            } else {
+                auto entityPostRenderDataBatch = Renderer::instance().world()->entities()->entityPostBatch();
+                const int postRenderFlag = PostRenderModule::renderTargetPostFlag(pass->target);
+                if (entityPostRenderDataBatch != nullptr) {
+                    for (const auto &entity : entityPostRenderDataBatch->entities) {
+                        if (entity->postRenderFlag != postRenderFlag) { continue; }
+
+                        for (uint32_t geometryIndex = 0; geometryIndex < entity->geometryCount; geometryIndex++) {
+                            const std::string &contentName =
+                                geometryIndex < entity->geometryContentNames.size() ?
+                                    entity->geometryContentNames[geometryIndex] :
+                                    std::string{};
+                            if (findShaderVariant(*pass, contentName) != nullptr) {
+                                hasWork = true;
+                                break;
+                            }
+                        }
+                        if (hasWork) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!hasWork) { return; }
+
+            worldCommandBuffer->beginRenderPass({
+                .renderPass = pass->renderPass,
+                .framebuffer = pass->framebuffers[frameIndex],
+                .renderAreaExtent = {postRenderedImage->width(), postRenderedImage->height()},
+                .clearValues = {},
+            });
+            postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            if (pass->writesFirstHitDepth) {
+                firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            }
+            worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS);
+            if (pass->target == RenderPass::Target::Star) {
+                worldCommandBuffer->bindGraphicsPipeline(pass->pipeline)
+                    ->bindVertexBuffers(module->starFieldVertexBuffer)
+                    ->draw(module->starFieldVertexBuffer->size() / sizeof(vk::VertexFormat::PBRVertex), 1);
+            } else {
+                auto entityPostRenderDataBatch = Renderer::instance().world()->entities()->entityPostBatch();
+                const int postRenderFlag = PostRenderModule::renderTargetPostFlag(pass->target);
+                const RenderPass::ShaderVariant *boundVariant = nullptr;
+                for (const auto &entity : entityPostRenderDataBatch->entities) {
+                    if (entity->postRenderFlag != postRenderFlag) { continue; }
+
+                    for (uint32_t j = 0; j < entity->geometryCount; j++) {
+                        const std::string &contentName =
+                            j < entity->geometryContentNames.size() ? entity->geometryContentNames[j] : std::string{};
+                        const RenderPass::ShaderVariant *variant = findShaderVariant(*pass, contentName);
+                        if (variant == nullptr || variant->pipeline == nullptr) { continue; }
+                        const std::string variantName = findShaderVariantName(*pass, contentName);
+                        // if (!variantName.empty()) {
+                        //     logShaderVariantSelectionOnce(pass->config.name, contentName, variantName);
+                        // }
+                        if (variant != boundVariant) {
+                            worldCommandBuffer->bindGraphicsPipeline(variant->pipeline);
+                            boundVariant = variant;
+                        }
+
+                        auto &vertexBuffer = entity->vertexBuffers[j];
+                        auto &indexBuffer = entity->indexBuffers[j];
+
+                        worldCommandBuffer->bindVertexBuffers(vertexBuffer)
+                            ->bindIndexBuffer(indexBuffer)
+                            ->drawIndexed(entity->indexCounts[j], 1);
+                    }
+                }
+            }
+            worldCommandBuffer->endRenderPass();
+            postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            if (pass->writesFirstHitDepth) {
+                firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            }
+            worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        };
+        module->shaderPack_->executeCommands(
+            ShaderPackLoader::Stage::PostRender,
+            module->shaderPack_->execution(ShaderPackLoader::Stage::PostRender).commands, variables,
+            module->executionExpressionVariables(), true, 1u << 16, executePass);
+        for (auto &[name, value] : module->globalVariables_) {
+            auto iter = variables.find(name);
+            if (iter != variables.end()) { value = iter->second.value; }
         }
     }
 
-    worldCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    // render post star field
-    {
+    auto finalizePostRenderTarget = [&]() {
         VkPipelineStageFlags2 srcStagePost = 0;
         VkAccessFlags2 srcAccessPost = 0;
         chooseSrc(postRenderedImage->imageLayout(),
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                   VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                   srcStagePost, srcAccessPost);
-
-        VkPipelineStageFlags2 srcStageLight = 0;
-        VkAccessFlags2 srcAccessLight = 0;
-        chooseSrc(worldLightMapImage->imageLayout(),
-                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                  srcStageLight, srcAccessLight);
 
         worldCommandBuffer->barriersBufferImage(
             {}, {{
@@ -1136,47 +1913,12 @@ void PostRenderModuleContext::render() {
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = postRenderedImage,
                      .subresourceRange = vk::wholeColorSubresourceRange,
-                 },
-                 {
-                     .srcStageMask = srcStageLight,
-                     .srcAccessMask = srcAccessLight,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .oldLayout = worldLightMapImage->imageLayout(),
-                     .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     .srcQueueFamilyIndex = mainQueueIndex,
-                     .dstQueueFamilyIndex = mainQueueIndex,
-                     .image = worldLightMapImage,
-                     .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
-    }
 #ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 #endif
-    worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    worldCommandBuffer->beginRenderPass({
-        .renderPass = module->worldPostRenderPass_,
-        .framebuffer = worldPostFramebuffer,
-        .renderAreaExtent = {worldPostDepthImage->width(), worldPostDepthImage->height()},
-        .clearValues = {},
-    });
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
-        ->bindGraphicsPipeline(module->worldPostStarFieldPipeline_)
-
-        ->bindVertexBuffers(module->starFieldVertexBuffer)
-        ->draw(module->starFieldVertexBuffer->size() / sizeof(vk::VertexFormat::PBRVertex), 1);
-
-    worldCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    };
+    finalizePostRenderTarget();
 }

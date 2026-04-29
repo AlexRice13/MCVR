@@ -41,3 +41,28 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBui
     Renderer::options.chunkBuildingTotalBatches = chunkBuildingTotalBatches;
     if (write) Renderer::instance().world()->chunks()->resetScheduler();
 }
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCollectChunkEmission(
+    JNIEnv *, jclass, jboolean collectChunkEmission, jboolean write) {
+    (void)write;
+    bool collect = static_cast<bool>(collectChunkEmission);
+    if (Renderer::options.collectChunkEmission == collect) {
+        return;
+    }
+
+    Renderer::options.collectChunkEmission = collect;
+    if (!Renderer::is_initialized()) {
+        return;
+    }
+
+    auto world = Renderer::instance().world();
+    if (world != nullptr && world->chunks() != nullptr) {
+        world->chunks()->setCollectChunkEmission(collect);
+    }
+    if (!collect) {
+        auto textures = Renderer::instance().textures();
+        if (textures != nullptr) {
+            textures->releaseEmission();
+        }
+    }
+}

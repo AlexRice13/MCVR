@@ -5,8 +5,9 @@
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
-#include <map>
 #include <array>
+#include <map>
+#include <unordered_map>
 
 class Framework;
 class FrameworkContext;
@@ -22,16 +23,22 @@ struct GraphicsPipelineShaders {
     std::shared_ptr<vk::Shader> fragmentShader;
 };
 
-enum OverlayDrawPipelineType {
-    POSITION_TEX,
-    POSITION_COLOR,
-    POSITION_TEX_COLOR,
-    POSITION_COLOR_TEX_LIGHT,
-    POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL,
-    POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL_NO_OUTLINE,
-    POSITION_END_PORTAL,
-    POSITION,
-    MAX_OVERLAY_DRAW_PIPELINE_TYPE,
+struct OverlayDynamicDrawShaderInfo {
+    std::string key;
+    uint32_t vertexFormatType;
+    uint32_t drawMode;
+    uint32_t uniformSize;
+    std::string vertexShaderPath;
+    std::string fragmentShaderPath;
+    std::unordered_map<std::string, std::string> definitions;
+    VkPrimitiveTopology topology;
+    GraphicsPipelineShaders shaders;
+    std::shared_ptr<vk::DynamicGraphicsPipeline> pipeline;
+};
+
+struct OverlayTextureBinding {
+    std::shared_ptr<vk::Sampler> sampler;
+    std::shared_ptr<vk::DeviceLocalImage> image;
 };
 
 enum OverlayPostPipelineType {
@@ -57,17 +64,27 @@ class UIModule : public SharedObject<UIModule> {
     void init(std::shared_ptr<Framework> framework);
     std::vector<std::shared_ptr<UIModuleContext>> &contexts();
     std::vector<std::shared_ptr<vk::DescriptorTable>> &overlayDescriptorTables();
+    const std::vector<OverlayDynamicDrawShaderInfo> &overlayDynamicDrawShaders() const;
+    uint32_t registerOverlayDrawShader(const std::string &key,
+                                       uint32_t vertexFormatType,
+                                       uint32_t drawMode,
+                                       uint32_t uniformSize,
+                                       const std::string &vertexShaderPath,
+                                       const std::string &fragmentShaderPath,
+                                       const std::unordered_map<std::string, std::string> &definitions);
+    const OverlayDynamicDrawShaderInfo &overlayDrawShaderInfo(uint32_t shaderId) const;
 
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
+    void refreshOverlayDescriptorTable(uint32_t frameIndex);
 
   private:
+    std::shared_ptr<vk::DescriptorTable> createOverlayDescriptorTable();
+    void bindOverlayDescriptorTableResources(std::shared_ptr<vk::DescriptorTable> descriptorTable, uint32_t frameIndex);
     void initOverlayDescriptorTablesAndFrameSamplers();
 
     void initOverlayDrawImages();
     void initOverlayDrawRenderPass();
     void initOverlayDrawFrameBuffers();
-    void initOverlayDrawPipelineTypes();
-    void initOverlayDrawPipelines();
 
     void initOverlayPostImages();
     void initOverlayPostRenderPass();
@@ -83,9 +100,9 @@ class UIModule : public SharedObject<UIModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> overlayDrawDepthStencilImages_;
     std::shared_ptr<vk::RenderPass> overlayDrawRenderPass_;
     std::vector<std::shared_ptr<vk::Framebuffer>> overlayDrawFramebuffers_;
-    std::map<OverlayDrawPipelineType, GraphicsPipelineShaderInfo> overlayDrawPipelineInfos_;
-    std::map<OverlayDrawPipelineType, GraphicsPipelineShaders> overlayDrawPipelineShaders_;
-    std::map<OverlayDrawPipelineType, std::shared_ptr<vk::DynamicGraphicsPipeline>> overlayDrawPipelines_;
+    std::unordered_map<std::string, uint32_t> overlayDynamicDrawShaderIds_;
+    std::vector<OverlayDynamicDrawShaderInfo> overlayDynamicDrawShaders_;
+    std::unordered_map<int, OverlayTextureBinding> overlayTextureBindings_;
 
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> overlayPostColorImages_;
     std::vector<std::shared_ptr<vk::Sampler>> overlayDrawColorImageSamplers_;
@@ -198,11 +215,13 @@ struct UIModuleContext : public SharedObject<UIModuleContext> {
 
     void drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer,
                      std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer,
-                     OverlayDrawPipelineType pipelineType,
+                     uint32_t shaderId,
+                     uint32_t uniformOffset,
                      uint32_t indexCount,
                      VkIndexType indexType);
 
     void postBlur(int times = 1);
+    void refreshOverlayDescriptorTable();
 
     void begin(std::shared_ptr<UIModuleContext> lastContext);
     void end();

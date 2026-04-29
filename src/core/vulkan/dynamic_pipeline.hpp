@@ -56,6 +56,8 @@ class DynamicGraphicsPipelineBuilder {
     template <typename T>
     DynamicGraphicsPipelineBuilder &defineVertexInputState();
 
+    DynamicGraphicsPipelineBuilder &defineVertexInputState(const VertexLayoutInfo &vertexLayoutInfo);
+
     DynamicGraphicsPipelineBuilder &definePipelineLayout(std::shared_ptr<DescriptorTable> descriptorTable);
 
     DynamicGraphicsPipelineBuilder &defineInputAssemblyState(VkPrimitiveTopology topology);
@@ -176,7 +178,11 @@ class DynamicGraphicsPipelineBuilder {
 template <typename T>
 DynamicGraphicsPipelineBuilder &DynamicGraphicsPipelineBuilder::defineVertexInputState() {
     VertexLayoutInfo &vertexLayoutInfo = Vertex::vertexLayoutInfo<T>();
+    return defineVertexInputState(vertexLayoutInfo);
+}
 
+inline DynamicGraphicsPipelineBuilder &
+DynamicGraphicsPipelineBuilder::defineVertexInputState(const VertexLayoutInfo &vertexLayoutInfo) {
     vertexInputStateCreateInfo_.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputStateCreateInfo_.vertexBindingDescriptionCount = 1;
     vertexInputStateCreateInfo_.pVertexBindingDescriptions = &vertexLayoutInfo.bindingDescription;

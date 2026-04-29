@@ -41,15 +41,6 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_perform
     buffers->performQueuedUpload();
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateOverlayDrawUniform(JNIEnv *,
-                                                                                                  jclass,
-                                                                                                  jlong ptr) {
-    auto buffers = Renderer::instance().buffers();
-    if (buffers == nullptr) return;
-    vk::Data::OverlayUBO *ubo = reinterpret_cast<vk::Data::OverlayUBO *>(ptr);
-    buffers->appendOverlayDrawUniform(*ubo);
-}
-
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateOverlayPostUniform(JNIEnv *,
                                                                                                   jclass,
                                                                                                   jlong ptr) {
@@ -105,13 +96,4 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateM
     if (buffers == nullptr) return;
     vk::Data::TextureMapping *mapping = reinterpret_cast<vk::Data::TextureMapping *>(ptr);
     buffers->setAndUploadTextureMappingBuffer(*mapping);
-}
-
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateLightMapUniform(JNIEnv *,
-                                                                                               jclass,
-                                                                                               jlong ptr) {
-    auto buffers = Renderer::instance().buffers();
-    if (buffers == nullptr) return;
-    vk::Data::LightMapUBO *lightMapUBO = reinterpret_cast<vk::Data::LightMapUBO *>(ptr);
-    buffers->setAndUploadLightMapUniformBuffer(*lightMapUBO);
 }

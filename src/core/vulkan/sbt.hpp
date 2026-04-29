@@ -5,7 +5,8 @@
 #include <vector>
 
 namespace vk {
-class HostVisibleBuffer;
+class DeviceLocalBuffer;
+class CommandBuffer;
 class PhysicalDevice;
 class Device;
 class VMA;
@@ -21,7 +22,8 @@ class SBT : public SharedObject<SBT> {
         uint32_t hitCount);
     ~SBT();
 
-    void setupHitSBT(std::vector<uint32_t> &hitGroupIndices);
+    void uploadStaticSBT(std::shared_ptr<CommandBuffer> commandBuffer);
+    void setupHitSBT(std::vector<uint32_t> &hitGroupIndices, std::shared_ptr<CommandBuffer> commandBuffer);
 
     VkStridedDeviceAddressRegionKHR &raygenRegion();
     VkStridedDeviceAddressRegionKHR &missRegion();
@@ -44,8 +46,8 @@ class SBT : public SharedObject<SBT> {
     VkStridedDeviceAddressRegionKHR hitRegion_{};
     VkStridedDeviceAddressRegionKHR callableRegion_{};
 
-    std::shared_ptr<HostVisibleBuffer> rgenSBT_;
-    std::shared_ptr<HostVisibleBuffer> rmissSBT_;
-    std::shared_ptr<HostVisibleBuffer> rhitSBT_;
+    std::shared_ptr<DeviceLocalBuffer> rgenSBT_;
+    std::shared_ptr<DeviceLocalBuffer> rmissSBT_;
+    std::shared_ptr<DeviceLocalBuffer> rhitSBT_;
 };
 }; // namespace vk

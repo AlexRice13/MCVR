@@ -107,15 +107,34 @@ std::shared_ptr<vk::DescriptorTable> vk::DescriptorTable::bindSamplerImageForSha
 
 std::shared_ptr<vk::DescriptorTable>
 vk::DescriptorTable::bindBuffer(std::shared_ptr<Buffer> buffer, uint32_t set, uint32_t binding) {
-    return bindBuffer(buffer, set, binding, 0);
+    return bindBufferRange(buffer, set, binding, 0, 0, buffer->size());
 }
 
 std::shared_ptr<vk::DescriptorTable>
 vk::DescriptorTable::bindBuffer(std::shared_ptr<Buffer> buffer, uint32_t set, uint32_t binding, uint32_t index) {
+    return bindBufferRange(buffer, set, binding, index, 0, buffer->size());
+}
+
+std::shared_ptr<vk::DescriptorTable>
+vk::DescriptorTable::bindBufferRange(std::shared_ptr<Buffer> buffer,
+                                     uint32_t set,
+                                     uint32_t binding,
+                                     VkDeviceSize offset,
+                                     VkDeviceSize range) {
+    return bindBufferRange(buffer, set, binding, 0, offset, range);
+}
+
+std::shared_ptr<vk::DescriptorTable>
+vk::DescriptorTable::bindBufferRange(std::shared_ptr<Buffer> buffer,
+                                     uint32_t set,
+                                     uint32_t binding,
+                                     uint32_t index,
+                                     VkDeviceSize offset,
+                                     VkDeviceSize range) {
     VkDescriptorBufferInfo descriptorBufferInfo{};
     descriptorBufferInfo.buffer = buffer->vkBuffer();
-    descriptorBufferInfo.offset = 0;
-    descriptorBufferInfo.range = buffer->size();
+    descriptorBufferInfo.offset = offset;
+    descriptorBufferInfo.range = range;
 
     VkWriteDescriptorSet writeDescriptorSet = {};
     writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -127,7 +146,6 @@ vk::DescriptorTable::bindBuffer(std::shared_ptr<Buffer> buffer, uint32_t set, ui
     writeDescriptorSet.dstArrayElement = index;
 
     vkUpdateDescriptorSets(device_->vkDevice(), 1, &writeDescriptorSet, 0, nullptr);
-
     return shared_from_this();
 }
 
@@ -177,6 +195,19 @@ vk::DescriptorTable::bindAS(std::shared_ptr<TLAS> tlas, uint32_t set, uint32_t b
 
 uint32_t vk::DescriptorTable::setCount() {
     return table_.size();
+}
+
+uint32_t vk::DescriptorTable::dynamicDescriptorCount() const {
+    uint32_t count = 0;
+    for (const auto &setTypes : tableTypes_) {
+        for (VkDescriptorType type : setTypes) {
+            if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+                count++;
+            }
+        }
+    }
+    return count;
 }
 
 std::vector<VkDescriptorSet> &vk::DescriptorTable::descriptorSet() {
@@ -247,15 +278,29 @@ std::shared_ptr<vk::DescriptorTable> vk::DescriptorTableBuilder::build(std::shar
     // create layout for each set
     std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
     std::map<VkDescriptorType, uint32_t> descriptorTypeCount;
+    bool hasUpdateAfterBindSet = false;
 
     for (vk::DescriptorTableBuilder::DescriptorLayoutSetBindingBuilder &setBindingBuilder :
          setBuilders.setBindingBuilders) {
         VkDescriptorSetLayout &descriptorSetLayout = descriptorSetLayouts.emplace_back();
+        bool hasDynamicDescriptor = false;
+        for (const VkDescriptorSetLayoutBinding &binding : setBindingBuilder.bindings) {
+            if (binding.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+                hasDynamicDescriptor = true;
+                break;
+            }
+        }
 
-        std::vector<VkDescriptorBindingFlags> bindingFlags(static_cast<uint32_t>(setBindingBuilder.bindings.size()),
-                                                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-                                                               VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
-                                                               VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+        std::vector<VkDescriptorBindingFlags> bindingFlags(
+            static_cast<uint32_t>(setBindingBuilder.bindings.size()), 0);
+        if (!hasDynamicDescriptor) {
+            std::fill(bindingFlags.begin(), bindingFlags.end(),
+                      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                          VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
+                          VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+            hasUpdateAfterBindSet = true;
+        }
 
         VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
         bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
@@ -264,7 +309,8 @@ std::shared_ptr<vk::DescriptorTable> vk::DescriptorTableBuilder::build(std::shar
 
         VkDescriptorSetLayoutCreateInfo descriptorLayoutCreateInfo = {};
         descriptorLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        descriptorLayoutCreateInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+        descriptorLayoutCreateInfo.flags =
+            hasDynamicDescriptor ? 0 : VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
         descriptorLayoutCreateInfo.pNext = &bindingFlagsInfo;
         descriptorLayoutCreateInfo.bindingCount = setBindingBuilder.bindings.size();
         descriptorLayoutCreateInfo.pBindings = setBindingBuilder.bindings.data();
@@ -301,7 +347,8 @@ std::shared_ptr<vk::DescriptorTable> vk::DescriptorTableBuilder::build(std::shar
 
     VkDescriptorPoolCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    createInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    createInfo.flags =
+        hasUpdateAfterBindSet ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0;
     createInfo.poolSizeCount = poolSizes.size();
     createInfo.pPoolSizes = poolSizes.data();
     createInfo.maxSets = descriptorSetLayouts.size();

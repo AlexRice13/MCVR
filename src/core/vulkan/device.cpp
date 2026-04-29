@@ -234,14 +234,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     extendedDynamicState2.pNext = &extendedDynamicState3;
     if (hasExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME)) {
         extendedDynamicState2.extendedDynamicState2 = supportedExtendedDynamicState2.extendedDynamicState2;
-#if defined(USE_AMD)
-        // AMD drivers have issues with extendedDynamicState2LogicOp on both Linux and Windows
-        VkBool32 wantLogicOp = VK_FALSE;
-#else
-        VkBool32 wantLogicOp = VK_TRUE;
-#endif
         extendedDynamicState2.extendedDynamicState2LogicOp =
-            (supportedExtendedDynamicState2.extendedDynamicState2LogicOp && wantLogicOp) ? VK_TRUE : VK_FALSE;
+            supportedExtendedDynamicState2.extendedDynamicState2LogicOp ? VK_TRUE : VK_FALSE;
 
         // Store the flag for runtime checks
         extendedDynamicState2LogicOp_ = (extendedDynamicState2.extendedDynamicState2LogicOp == VK_TRUE);
@@ -317,6 +311,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     }
 
     VkPhysicalDeviceFeatures features = {};
+    features.independentBlend = supportedFeatures2.features.independentBlend;
     features.shaderClipDistance = supportedFeatures2.features.shaderClipDistance;
     features.shaderCullDistance = supportedFeatures2.features.shaderCullDistance;
     features.logicOp = supportedFeatures2.features.logicOp;

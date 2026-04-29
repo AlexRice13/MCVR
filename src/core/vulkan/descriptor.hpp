@@ -27,6 +27,7 @@ class DescriptorTable : public SharedObject<DescriptorTable> {
     ~DescriptorTable();
 
     uint32_t setCount();
+    uint32_t dynamicDescriptorCount() const;
     std::vector<VkDescriptorSet> &descriptorSet();
     std::vector<VkDescriptorSetLayout> &descriptorSetLayout();
     VkPipelineLayout &vkPipelineLayout();
@@ -51,6 +52,17 @@ class DescriptorTable : public SharedObject<DescriptorTable> {
     std::shared_ptr<DescriptorTable> bindBuffer(std::shared_ptr<Buffer> buffer, uint32_t set, uint32_t binding);
     std::shared_ptr<DescriptorTable>
     bindBuffer(std::shared_ptr<Buffer> buffer, uint32_t set, uint32_t binding, uint32_t index);
+    std::shared_ptr<DescriptorTable> bindBufferRange(std::shared_ptr<Buffer> buffer,
+                                                     uint32_t set,
+                                                     uint32_t binding,
+                                                     VkDeviceSize offset,
+                                                     VkDeviceSize range);
+    std::shared_ptr<DescriptorTable> bindBufferRange(std::shared_ptr<Buffer> buffer,
+                                                     uint32_t set,
+                                                     uint32_t binding,
+                                                     uint32_t index,
+                                                     VkDeviceSize offset,
+                                                     VkDeviceSize range);
     std::shared_ptr<DescriptorTable>
     bindBuffers(std::vector<std::shared_ptr<Buffer>> buffers, uint32_t set, uint32_t binding);
 

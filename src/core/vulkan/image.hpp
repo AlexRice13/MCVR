@@ -70,6 +70,7 @@ class Image {
   public:
     virtual uint32_t width() = 0;
     virtual uint32_t height() = 0;
+    virtual uint32_t depth() = 0;
     virtual uint32_t layer() = 0;
     virtual VkFormat &vkFormat() = 0;
     virtual VkImage &vkImage() = 0;
@@ -83,6 +84,7 @@ class SwapchainImage : public Image, public SharedObject<SwapchainImage> {
 
     uint32_t width() override;
     uint32_t height() override;
+    uint32_t depth() override;
     uint32_t layer() override;
     VkFormat &vkFormat() override;
     VkImage &vkImage() override;
@@ -121,9 +123,36 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     );
     DeviceLocalImage(std::shared_ptr<Device> device,
                      std::shared_ptr<VMA> vma,
+                     uint32_t width,
+                     uint32_t height,
+                     uint32_t depth,
+                     uint32_t layer,
+                     VkFormat format,
+                     VkImageUsageFlags usage
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
+    DeviceLocalImage(std::shared_ptr<Device> device,
+                     std::shared_ptr<VMA> vma,
                      bool persistStaging,
                      uint32_t width,
                      uint32_t height,
+                     uint32_t layer,
+                     VkFormat format,
+                     VkImageUsageFlags usage
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
+    DeviceLocalImage(std::shared_ptr<Device> device,
+                     std::shared_ptr<VMA> vma,
+                     bool persistStaging,
+                     uint32_t width,
+                     uint32_t height,
+                     uint32_t depth,
                      uint32_t layer,
                      VkFormat format,
                      VkImageUsageFlags usage
@@ -165,6 +194,24 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
                      std::string debugName = ""
 #endif
     );
+    DeviceLocalImage(std::shared_ptr<Device> device,
+                     std::shared_ptr<VMA> vma,
+                     bool persistStaging,
+                     uint32_t mipLevels,
+                     uint32_t width,
+                     uint32_t height,
+                     uint32_t depth,
+                     uint32_t layer,
+                     VkFormat format,
+                     VkImageUsageFlags usage,
+                     VmaAllocationCreateFlags allocationFlag,
+                     VmaMemoryUsage vmaUsage,
+                     VkImageCreateFlags imageCreateFlags = 0
+#ifdef DEBUG
+                     ,
+                     std::string debugName = ""
+#endif
+    );
     ~DeviceLocalImage();
 
     // void downloadFromStagingBuffer(size_t size = -1, size_t offset = -1);
@@ -181,6 +228,7 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
 
     uint32_t width() override;
     uint32_t height() override;
+    uint32_t depth() override;
     uint32_t layer() override;
     VkFormat &vkFormat() override;
     VkBuffer &vkStagingBuffer();
@@ -188,15 +236,23 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     VkImageView &vkImageView(int index = 0) override;
     VkImageLayout &imageLayout();
     void *mappedPtr();
+    VkImageSubresourceRange fullSubresourceRange() const;
 
     void addImageView(VkImageViewCreateInfo info);
 
   private:
+    static VkImageAspectFlags imageAspectMask(VkImageUsageFlags usage);
+    static VkImageSubresourceRange
+    makeImageSubresourceRange(VkImageAspectFlags aspectMask, uint32_t mipLevels, uint32_t depth, uint32_t layer);
+    static size_t imageByteSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t layer, VkFormat format);
+
     std::shared_ptr<Device> device_;
     std::shared_ptr<VMA> vma_;
 
+    uint32_t mipLevels_;
     uint32_t width_;
     uint32_t height_;
+    uint32_t depth_;
     uint32_t layer_;
     VkFormat format_;
     bool persistStaging_;
@@ -241,7 +297,7 @@ class Sampler : public SharedObject<Sampler> {
 class ImageLoader : public SharedObject<ImageLoader> {
   public:
     // ImageLoader(std::string imagePath, uint32_t forceChannel);
-    ImageLoader(std::vector<std::string> imagePaths, uint32_t forceChannel);
+    ImageLoader(std::vector<std::string> imagePaths, uint32_t forceChannel, bool convertLinearToSrgb = true);
     ~ImageLoader();
 
     uint32_t width();

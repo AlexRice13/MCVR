@@ -32,7 +32,6 @@ layout(set = 2, binding = 1) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
-const float kInfDepth = 65504.0;
 const float kMinDiffuseAlbedo = 0.05;
 const float kMinSpecularAlbedo = 0.04;
 const vec3 kUnderwaterColor = vec3(0.0, 0.48, 0.65);
@@ -69,21 +68,11 @@ void main() {
     float fogTransmittance = useFogCompose ? clamp(fogData.a, 0.0, 1.0) : 1.0;
     vec3 fogAdditive = useFogCompose ? fogData.rgb : vec3(0.0);
 
-    float currDepth = imageLoad(linearDepthImage, pixel).r;
-    bool currDepthValid = !(isnan(currDepth) || isinf(currDepth) || currDepth >= kInfDepth * 0.9);
-    vec4 currRefractionData = imageLoad(refractionRadianceImage, pixel);
-    bool hasCurrentRefraction = currRefractionData.a > 0.5 && clear.a == 0.0 && currDepthValid;
-    vec3 refractionRadiance = hasCurrentRefraction ? max(currRefractionData.rgb, vec3(0.0)) : vec3(0.0);
-
-    // Keep the history surfaces cleared: compose should match the raygen split exactly.
-    imageStore(refractionHistoryRadianceImage, pixel, vec4(0.0));
-    imageStore(refractionHistoryDepthImage, pixel, vec4(kInfDepth, 0.0, 0.0, 0.0));
-
     vec3 result;
     if (clear.a > 0.0) {
         result = clearRadiance;
     } else {
-        vec3 baseRadiance = diffRadiance + specRadiance + refractionRadiance + emissionRadiance;
+        vec3 baseRadiance = diffRadiance + specRadiance + emissionRadiance;
         if (useFogCompose && skyUBO.cameraSubmersionType == 1) {
             baseRadiance *= kUnderwaterColor;
         }

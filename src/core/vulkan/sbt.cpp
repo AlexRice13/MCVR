@@ -1,6 +1,7 @@
 #include "core/vulkan/sbt.hpp"
 
 #include "core/vulkan/buffer.hpp"
+#include "core/vulkan/command.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/pipeline.hpp"
@@ -9,7 +10,7 @@
 #include <cstring>
 #include <vector>
 
-uint32_t align(uint32_t addr, uint32_t alignment) {
+static uint32_t align(uint32_t addr, uint32_t alignment) {
     return (addr + alignment - 1) & ~(alignment - 1);
 }
 
@@ -38,17 +39,17 @@ vk::SBT::SBT(std::shared_ptr<PhysicalDevice> physicalDevice,
     vkGetRayTracingShaderGroupHandlesKHR(device->vkDevice(), pipeline->vkPipeline(), 0, groupCount,
                                          shaderHandleStorage_.size(), shaderHandleStorage_.data());
 
-    rgenSBT_ = HostVisibleBuffer::create(
-        vma, device, handleSize_,
-        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, baseAlignment_);
-    rmissSBT_ = HostVisibleBuffer::create(
-        vma, device, alignedHandleSize_ * missCount,
-        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, baseAlignment_);
+    rgenSBT_ = DeviceLocalBuffer::create(
+        vma, device, false, handleSize_,
+        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0,
+        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, baseAlignment_);
+    rmissSBT_ = DeviceLocalBuffer::create(
+        vma, device, false, alignedHandleSize_ * missCount,
+        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0,
+        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, baseAlignment_);
 
-    rgenSBT_->uploadToBuffer(&shaderHandleStorage_[0]);
-    rgenSBT_->flush();
-    rmissSBT_->uploadToBuffer(&shaderHandleStorage_[handleSize_]);
-    rmissSBT_->flush();
+    rgenSBT_->uploadToStagingBuffer(&shaderHandleStorage_[0]);
+    rmissSBT_->uploadToStagingBuffer(&shaderHandleStorage_[handleSize_]);
 
     // 设置SBT区域
     raygenRegion_.deviceAddress = rgenSBT_->bufferAddress();
@@ -62,7 +63,28 @@ vk::SBT::SBT(std::shared_ptr<PhysicalDevice> physicalDevice,
 
 vk::SBT::~SBT() {}
 
-void vk::SBT::setupHitSBT(std::vector<uint32_t> &hitGroupIndices) {
+void vk::SBT::uploadStaticSBT(std::shared_ptr<CommandBuffer> commandBuffer) {
+    auto addBarrier = [commandBuffer](std::shared_ptr<vk::DeviceLocalBuffer> buffer) {
+        commandBuffer->barriersBufferImage(
+            {vk::CommandBuffer::BufferMemoryBarrier{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = buffer,
+            }},
+            {});
+    };
+
+    rgenSBT_->uploadToBuffer(commandBuffer);
+    addBarrier(rgenSBT_);
+    rmissSBT_->uploadToBuffer(commandBuffer);
+    addBarrier(rmissSBT_);
+}
+
+void vk::SBT::setupHitSBT(std::vector<uint32_t> &hitGroupIndices, std::shared_ptr<CommandBuffer> commandBuffer) {
     VkDeviceSize rhitSBTSize = hitGroupIndices.size() * alignedHandleSize_;
     if (rhitSBTSize == 0) {
         std::cerr << "Hit group should contains something!" << std::endl;
@@ -82,12 +104,26 @@ void vk::SBT::setupHitSBT(std::vector<uint32_t> &hitGroupIndices) {
         memcpy(pDest, pSourceHandle, handleSize_);
     }
 
-    rhitSBT_ = HostVisibleBuffer::create(
-        vma_, device_, rhitSBTSize,
-        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, baseAlignment_);
+    if (rhitSBT_ == nullptr || rhitSBT_->size() != rhitSBTSize) {
+        rhitSBT_ = DeviceLocalBuffer::create(
+            vma_, device_, false, rhitSBTSize,
+            VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0,
+            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, baseAlignment_);
+    }
 
-    rhitSBT_->uploadToBuffer(cachedRhitSBT.data());
-    rhitSBT_->flush();
+    rhitSBT_->uploadToStagingBuffer(cachedRhitSBT.data());
+    rhitSBT_->uploadToBuffer(commandBuffer);
+    commandBuffer->barriersBufferImage(
+        {vk::CommandBuffer::BufferMemoryBarrier{
+            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = rhitSBT_,
+        }},
+        {});
 
     hitRegion_.deviceAddress = rhitSBT_->bufferAddress();
     hitRegion_.stride = alignedHandleSize_;

@@ -3,13 +3,19 @@
 #include "common/shared.hpp"
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include "core/render/modules/world/world_module.hpp"
 
+#include <array>
 #include <filesystem>
+#include <functional>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <unordered_map>
+#include <variant>
 
 class Framework;
 class FrameworkContext;
@@ -18,34 +24,32 @@ struct WorldModuleContext;
 
 struct RayTracingModuleContext;
 
-class Atmosphere;
-class AtmosphereContext;
 class WorldPrepare;
-class WorldPrepareContext;
-
-struct RayTracingPushConstant {
-    uint32_t numRayBounces;
-    float directLightStrength;
-    float indirectLightStrength;
-    float basicRadiance;
-    uint32_t pbrSamplingMode;
-    uint32_t transparentSplitMode;
-};
-
-enum RayTracingTransparentSplitMode {
-    RAY_TRACING_TRANSPARENT_SPLIT_MODE_DETERMINISTIC = 0,
-    RAY_TRACING_TRANSPARENT_SPLIT_MODE_STOCHASTIC = 1,
-};
+struct WorldPrepareContext;
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
     friend RayTracingModuleContext;
-    friend Atmosphere;
-    friend AtmosphereContext;
 
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.ray_tracing.name";
     constexpr static uint32_t inputImageNum = 0;
     constexpr static uint32_t outputImageNum = 15;
+    
+    constexpr static std::string_view TARGET_RADIANCE = "out:radiance";
+    constexpr static std::string_view TARGET_DIFFUSE_ALBEDO_METALLIC = "out:diffuse_albedo_metallic";
+    constexpr static std::string_view TARGET_SPECULAR_ALBEDO = "out:specular_albedo";
+    constexpr static std::string_view TARGET_NORMAL_ROUGHNESS = "out:normal_roughness";
+    constexpr static std::string_view TARGET_MOTION_VECTOR = "out:motion_vector";
+    constexpr static std::string_view TARGET_LINEAR_DEPTH = "out:linear_depth";
+    constexpr static std::string_view TARGET_SPECULAR_HIT_DEPTH = "out:specular_hit_depth";
+    constexpr static std::string_view TARGET_FIRST_HIT_DEPTH = "out:first_hit_depth";
+    constexpr static std::string_view TARGET_FIRST_HIT_DIFFUSE_DIRECT_LIGHT = "out:first_hit_diffuse_direct_light";
+    constexpr static std::string_view TARGET_FIRST_HIT_DIFFUSE_INDIRECT_LIGHT = "out:first_hit_diffuse_indirect_light";
+    constexpr static std::string_view TARGET_FIRST_HIT_SPECULAR = "out:first_hit_specular";
+    constexpr static std::string_view TARGET_FIRST_HIT_CLEAR = "out:first_hit_clear";
+    constexpr static std::string_view TARGET_FIRST_HIT_BASE_EMISSION = "out:first_hit_base_emission";
+    constexpr static std::string_view TARGET_FOG_IMAGE = "out:fog_image";
+    constexpr static std::string_view TARGET_FIRST_HIT_REFRACTION = "out:first_hit_refraction";
 
     RayTracingModule();
 
@@ -58,6 +62,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
                                  std::vector<VkFormat> &formats,
                                  uint32_t frameIndex) override;
 
+    std::string getAttributes(const std::vector<std::string> &attributes, const std::string &language);
+
     void setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) override;
 
     void build() override;
@@ -69,13 +75,10 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
 
     void preClose() override;
 
-    uint32_t hitGroupIndexForName(const std::string &groupName) const;
-    uint32_t shadowHitGroupIndex() const;
-    uint32_t fallbackHitGroupIndex() const;
-
   private:
-    constexpr static uint32_t sharcCapacity = 1u << 22;
+    constexpr static uint32_t sharcCapacity = 1u << 23;
     constexpr static uint32_t sharcResolveWorkgroupSize = 64;
+    constexpr static uint32_t executionLoopLimit = 1u << 16;
 
     struct SharcConfigData {
         uint32_t hashEntriesAddress[2];
@@ -96,98 +99,123 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
         uint32_t updateDownsampleFactor;
     };
 
-  private:
-    struct HitShaderPaths {
-        std::optional<std::filesystem::path> anyHit;
-        std::optional<std::filesystem::path> closestHit;
-        std::optional<std::filesystem::path> intersection;
-    };
+    using ExecutionVariable = ShaderPack::ExecutionVariable;
+    using ExecutionVariables = ShaderPack::ExecutionVariables;
 
-    struct ParsedHitGroupConfig {
-        std::string name;
-        std::optional<std::filesystem::path> anyHit;
-        std::optional<std::filesystem::path> closestHit;
-        std::optional<std::filesystem::path> intersection;
-        VkRayTracingShaderGroupTypeKHR type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    };
-
-    struct HitShaderGroupDefinition {
-        std::string name;
-        std::shared_ptr<vk::Shader> closestHitShader;
-        std::shared_ptr<vk::Shader> anyHitShader;
-        std::shared_ptr<vk::Shader> intersectionShader;
-        VkRayTracingShaderGroupTypeKHR type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    };
-
-    struct MissShaderDefinition {
-        std::string name;
-        uint32_t index = 0;
-        std::shared_ptr<vk::Shader> shader;
-    };
+    using PassVariant = std::variant<std::shared_ptr<FullScreenPass>,
+                                     std::shared_ptr<RayTracingPass>,
+                                     std::shared_ptr<ComputePass>>;
 
   private:
+    static std::filesystem::path builtInShaderPackPath();
+    static std::shared_ptr<vk::Shader> createShader(std::shared_ptr<vk::Device> device,
+                                                    const std::filesystem::path &path,
+                                                    VkShaderStageFlagBits stage,
+                                                    const std::unordered_map<std::string, std::string> &definitions,
+                                                    const std::vector<std::string> &includeDirectories,
+                                                    const std::string &injectedSource);
+    void loadShaderPack();
     void initDescriptorTables();
-    void initImages();
-    void initPipeline();
-    void initSBT();
+    void initRuntimeTextures();
+    void initRuntimeBuffers();
+    void refreshRuntimeBuffers(uint32_t frameIndex);
+    void loadRuntimeResources();
     void initSharc();
+    void initPipelines();
+    void initSBTs();
+    void initContexts();
     void updateSharcConfig(uint32_t frameIndex);
+    void initExecutionVariables();
+    std::vector<ExpressionEvaluator::Variable> executionExpressionVariables() const;
+    double evaluateNumericExpression(const std::string &expression,
+                                     const ExecutionVariables &variables);
+    std::optional<std::reference_wrapper<ShaderPackLoader::VariableConfig>> findExecutionVariableConfig(std::string_view name);
+    std::optional<std::reference_wrapper<ShaderPack::RuntimeTexture>> findRuntimeTexture(std::string_view name);
+    std::optional<std::reference_wrapper<ShaderPack::RuntimeBuffer>> findRuntimeBuffer(std::string_view name);
+    std::shared_ptr<vk::DeviceLocalImage>
+    findRuntimeVKTexture(ShaderPack::RuntimeTexture &runtimeTexture, uint32_t frameIndex);
+    std::shared_ptr<vk::DeviceLocalBuffer>
+    findRuntimeVKBuffer(ShaderPack::RuntimeBuffer &runtimeBuffer, uint32_t frameIndex);
+    std::shared_ptr<vk::DeviceLocalImage> findTargetImage(const std::string &target, uint32_t frameIndex);
+    std::vector<std::shared_ptr<vk::Framebuffer>> buildFramebuffers(std::shared_ptr<vk::DeviceLocalImage> image,
+                                                                    std::shared_ptr<vk::RenderPass> renderPass);
+
+    void addPassResourceBarriers(const std::vector<std::string> &inputImages,
+                                 const std::vector<std::string> &inputBuffers,
+                                 const std::vector<std::string> &outputImages,
+                                 const std::vector<std::string> &outputBuffers,
+                                 std::vector<vk::CommandBuffer::BufferMemoryBarrier> &bufferBarriers,
+                                 std::vector<vk::CommandBuffer::ImageMemoryBarrier> &imageBarriers,
+                                 uint32_t frameIndex,
+                                 uint32_t queueIndex);
+    void addFullScreenTargetBarrier(const std::string &target,
+                                    std::vector<vk::CommandBuffer::ImageMemoryBarrier> &imageBarriers,
+                                    uint32_t frameIndex,
+                                    uint32_t queueIndex);
+
+    void initFullScreenPassTargets(FullScreenPass &pass,
+                                   std::shared_ptr<vk::Device> device,
+                                   uint32_t frameCount);
+    std::vector<ShaderPack::ShaderCreateInfo>
+    collectFullScreenPassShaderRequests(const FullScreenPass &pass,
+                                        const std::unordered_map<std::string, std::string> &definitions);
+    void buildFullScreenPassPipelines(FullScreenPass &pass,
+                                       std::shared_ptr<vk::Device> device,
+                                       const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
+                                       size_t &shaderOffset);
+    void renderFullScreenPass(const FullScreenPass &pass,
+                              RayTracingModuleContext &context);
+
+    std::vector<ShaderPack::ShaderCreateInfo>
+    collectRayTracingPassShaderRequests(RayTracingPass &pass,
+                                         const std::unordered_map<std::string, std::string> &definitions);
+    void buildRayTracingPassPipelines(RayTracingPass &pass,
+                                       std::shared_ptr<vk::Device> device,
+                                       const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
+                                       size_t &shaderOffset);
+    void renderSharcUpdateAndResolve(RayTracingPass &pass,
+                                     RayTracingModuleContext &context,
+                                     const ExecutionVariables &variables);
+    void renderRayTracingPass(RayTracingPass &pass,
+                              RayTracingModuleContext &context,
+                              const ExecutionVariables &variables);
+
+    std::vector<ShaderPack::ShaderCreateInfo>
+    collectComputePassShaderRequests(const ComputePass &pass,
+                                     const std::unordered_map<std::string, std::string> &definitions);
+    void buildComputePassPipelines(ComputePass &pass,
+                                    std::shared_ptr<vk::Device> device,
+                                    const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
+                                    size_t &shaderOffset);
+    void renderComputePass(const ComputePass &pass,
+                           RayTracingModuleContext &context,
+                           const ExecutionVariables &variables);
+    size_t shaderRequestCountForPass(PassVariant &passVariant);
+    void uploadStaticRayTracingPassSbts(std::shared_ptr<vk::Device> device);
 
   private:
-    // input
-    // none
-
-    // ray tracing
-    std::shared_ptr<vk::Shader> worldRayGenUpdateShader_;
-    std::shared_ptr<vk::Shader> worldRayGenQueryShader_;
-
-    std::vector<MissShaderDefinition> missShaders_;
-    std::vector<HitShaderGroupDefinition> hitShaderGroups_;
-    std::unordered_map<std::string, uint32_t> hitGroupNameToIndex_;
-    uint32_t shadowHitGroupIndex_ = 0;
-    uint32_t fallbackHitGroupIndex_ = 0;
-    uint32_t missGroupCount_ = 0;
-    uint32_t hitGroupCount_ = 0;
-    bool sharcCompatible_ = false;
-    bool useSharcRuntime_ = false;
-
-    std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
-    std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;
-    std::shared_ptr<vk::Shader> worldPostVertShader_;
-    std::shared_ptr<vk::Shader> worldPostFragShader_;
-    std::shared_ptr<vk::Shader> worldToneMappingVertShader_;
-    std::shared_ptr<vk::Shader> worldToneMappingFragShader_;
-    std::shared_ptr<vk::Shader> radianceHistCompShader_;
-    std::shared_ptr<vk::Shader> worldLightMapVertShader_;
-    std::shared_ptr<vk::Shader> worldLightMapFragShader_;
+    std::shared_ptr<vk::Shader> fullScreenVertexShader_;
 
     std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables_;
-    std::shared_ptr<vk::RayTracingPipeline> rayTracingUpdatePipeline_;
-    std::shared_ptr<vk::RayTracingPipeline> rayTracingQueryPipeline_;
-    std::vector<std::shared_ptr<vk::SBT>> sharcUpdateSbts_;
-    std::vector<std::shared_ptr<vk::SBT>> sharcQuerySbts_;
 
-    std::shared_ptr<vk::Shader> sharcResolveCompShader_;
-    std::shared_ptr<vk::ComputePipeline> sharcResolvePipeline_;
+    std::shared_ptr<ShaderPack> shaderPack_;
+    std::vector<PassVariant> passes_;
+    std::unordered_map<std::string, PassVariant> passNameToPass_;
+    std::shared_ptr<RayTracingPass> sharcUpdatePass_;
 
-    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> sharcConfigBuffers_;
     std::shared_ptr<vk::DeviceLocalBuffer> sharcHashEntriesBuffer_;
     std::shared_ptr<vk::DeviceLocalBuffer> sharcLockBuffer_;
     std::shared_ptr<vk::DeviceLocalBuffer> sharcAccumulationBuffer_;
     std::shared_ptr<vk::DeviceLocalBuffer> sharcResolvedBuffer_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> sharcConfigBuffers_;
 
     glm::dvec3 sharcPrevCameraPos_ = glm::dvec3(0.0);
     uint32_t sharcFrameIndex_ = 0;
-    bool sharcFirstFrame_ = true;
+    bool isFirstSharcFrame_ = true;
+    bool hasSharcRuntime_ = false;
 
-    uint32_t numRayBounces_ = 4;
-    bool useJitter_ = true;
-    float directLightStrength_ = 1.0f;
-    float indirectLightStrength_ = 16.0f;
-    float basicRadiance_ = 0.001f;
-    uint32_t pbrSamplingMode_ = 1;
-    uint32_t transparentSplitMode_ = RAY_TRACING_TRANSPARENT_SPLIT_MODE_DETERMINISTIC;
-    bool useSharc_ = true;
+    bool isJitterEnabled_ = true;
+    bool isSharcEnabled_ = true;
     uint32_t sharcDebugMode_ = 0;
     std::string shaderPackPath_;
     float sharcSceneScale_ = 64.0f;
@@ -195,7 +223,10 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     uint32_t sharcStaleFrameNumMax_ = 256;
     uint32_t sharcUpdateDownsampleFactor_ = 5;
 
-    // output
+    std::unordered_map<std::string, ShaderPackLoader::VariableConfig> executionVariableConfigs_;
+    std::unordered_map<std::string, std::string> globalVariables_;
+    std::unordered_map<std::string, std::string> staticAttributes_;
+
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> hdrNoisyOutputImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> diffuseAlbedoImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> specularAlbedoImages_;
@@ -212,8 +243,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> fogImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitRefractionImages_;
 
-    // submodules
-    std::shared_ptr<Atmosphere> atmosphere_;
     std::shared_ptr<WorldPrepare> worldPrepare_;
 
     std::vector<std::shared_ptr<WorldModuleContext>> contexts_;
@@ -222,15 +251,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
 struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTracingModuleContext> {
     std::weak_ptr<RayTracingModule> rayTracingModule;
 
-    // input
-    // none
-
-    // ray tracing
     std::shared_ptr<vk::DescriptorTable> rayTracingDescriptorTable;
-    std::shared_ptr<vk::SBT> sharcUpdateSbt;
-    std::shared_ptr<vk::SBT> sharcQuerySbt;
 
-    // output
     std::shared_ptr<vk::DeviceLocalImage> hdrNoisyOutputImage;
     std::shared_ptr<vk::DeviceLocalImage> diffuseAlbedoImage;
     std::shared_ptr<vk::DeviceLocalImage> specularAlbedoImage;
@@ -247,8 +269,6 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
     std::shared_ptr<vk::DeviceLocalImage> fogImage;
     std::shared_ptr<vk::DeviceLocalImage> firstHitRefractionImage;
 
-    // submodule
-    std::shared_ptr<AtmosphereContext> atmosphereContext;
     std::shared_ptr<WorldPrepareContext> worldPrepareContext;
 
     RayTracingModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,

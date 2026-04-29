@@ -55,31 +55,50 @@ install(
 )
 
 set(ZIP_INSTALL_DEST "${MCVR_INSTALL_LIB_DIR}/shaders/world/ray_tracing")
-set(RT_INTERNAL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/world/ray_tracing/internal")
+set(RT_INTERNAL_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/world/ray_tracing/internal")
 set(RT_UTIL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/util")
 set(RT_COMMON_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../common")
 set(RT_SHARC_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/sharc/include")
 set(RT_ZIP_STAGING_DIR "${CMAKE_CURRENT_BINARY_DIR}/ray_tracing_internal_zip")
+set(RT_LEGACY_SHADER_PACK_ZIPS restir-di.zip)
+
+foreach(RT_PACK_NAME ${MCVR_BUILT_IN_SHADER_PACKS})
+    if(NOT EXISTS "${RT_INTERNAL_ROOT_DIR}/${RT_PACK_NAME}/configs.json")
+        message(FATAL_ERROR "Built-in shader pack is missing configs.json: ${RT_INTERNAL_ROOT_DIR}/${RT_PACK_NAME}")
+    endif()
+endforeach()
+message(STATUS "Installing ray tracing built-in shader packs: ${MCVR_BUILT_IN_SHADER_PACKS}")
 
 install(CODE "
     file(MAKE_DIRECTORY \"${ZIP_INSTALL_DEST}\")
+    file(REMOVE \"${ZIP_INSTALL_DEST}/internal.zip\")
+    foreach(RT_LEGACY_SHADER_PACK_ZIP ${RT_LEGACY_SHADER_PACK_ZIPS})
+        file(REMOVE \"${ZIP_INSTALL_DEST}/\${RT_LEGACY_SHADER_PACK_ZIP}\")
+    endforeach()
 
-    file(REMOVE_RECURSE \"${RT_ZIP_STAGING_DIR}\")
-    file(MAKE_DIRECTORY \"${RT_ZIP_STAGING_DIR}\")
-    file(COPY \"${RT_INTERNAL_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}\")
-    file(COPY \"${RT_UTIL_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}/util\")
-    file(COPY \"${RT_COMMON_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}/common\")
-    file(COPY \"${RT_SHARC_SRC_DIR}/\" DESTINATION \"${RT_ZIP_STAGING_DIR}/extern/sharc/include\")
+    foreach(RT_PACK_NAME ${MCVR_BUILT_IN_SHADER_PACKS})
+        set(RT_PACK_SRC_DIR \"${RT_INTERNAL_ROOT_DIR}/\${RT_PACK_NAME}\")
+        set(RT_PACK_STAGING_DIR \"${RT_ZIP_STAGING_DIR}/\${RT_PACK_NAME}\")
+        set(RT_PACK_OUTPUT \"${ZIP_INSTALL_DEST}/\${RT_PACK_NAME}.zip\")
 
-    execute_process(
-        COMMAND \"${CMAKE_COMMAND}\" -E tar \"cf\" \"${ZIP_INSTALL_DEST}/internal.zip\" --format=zip .
-        WORKING_DIRECTORY \"${RT_ZIP_STAGING_DIR}\"
-        RESULT_VARIABLE ZIP_RESULT
-        OUTPUT_VARIABLE ZIP_STDOUT
-        ERROR_VARIABLE ZIP_STDERR
-    )
-    
-    if(NOT ZIP_RESULT EQUAL 0)
-        message(FATAL_ERROR \"Failed to create internal.zip (code=\${ZIP_RESULT})\\nstdout: \${ZIP_STDOUT}\\nstderr: \${ZIP_STDERR}\")
-    endif()
+        file(REMOVE_RECURSE \"\${RT_PACK_STAGING_DIR}\")
+        file(MAKE_DIRECTORY \"\${RT_PACK_STAGING_DIR}\")
+        file(COPY \"\${RT_PACK_SRC_DIR}/\" DESTINATION \"\${RT_PACK_STAGING_DIR}\")
+        file(COPY \"${RT_UTIL_SRC_DIR}/\" DESTINATION \"\${RT_PACK_STAGING_DIR}/util\")
+        file(COPY \"${RT_COMMON_SRC_DIR}/\" DESTINATION \"\${RT_PACK_STAGING_DIR}/common\")
+        file(COPY \"${RT_SHARC_SRC_DIR}/\" DESTINATION \"\${RT_PACK_STAGING_DIR}/extern/sharc/include\")
+        file(REMOVE \"\${RT_PACK_OUTPUT}\")
+
+        execute_process(
+            COMMAND \"${CMAKE_COMMAND}\" -E tar \"cf\" \"\${RT_PACK_OUTPUT}\" --format=zip .
+            WORKING_DIRECTORY \"\${RT_PACK_STAGING_DIR}\"
+            RESULT_VARIABLE ZIP_RESULT
+            OUTPUT_VARIABLE ZIP_STDOUT
+            ERROR_VARIABLE ZIP_STDERR
+        )
+
+        if(NOT ZIP_RESULT EQUAL 0)
+            message(FATAL_ERROR \"Failed to create \${RT_PACK_NAME}.zip (code=\${ZIP_RESULT})\\nstdout: \${ZIP_STDOUT}\\nstderr: \${ZIP_STDERR}\")
+        endif()
+    endforeach()
 ")

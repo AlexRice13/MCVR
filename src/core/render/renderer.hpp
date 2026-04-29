@@ -25,6 +25,7 @@ struct Options {
 
     uint32_t chunkBuildingBatchSize = 2;
     uint32_t chunkBuildingTotalBatches = 4;
+    bool collectChunkEmission = false;
 };
 
 class Renderer : public Singleton<Renderer> {

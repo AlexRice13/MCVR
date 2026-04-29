@@ -35,11 +35,9 @@ WorldPrepareContext::WorldPrepareContext(std::shared_ptr<FrameworkContext> frame
     : frameworkContext(frameworkContext), worldPrepare(worldPrepare) {}
 
 void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
-                                       std::vector<uint64_t> &vertexBufferAddrs,
                                        std::vector<uint64_t> &indexBufferAddrs,
                                        std::vector<uint64_t> &positionBufferAddrs,
                                        std::vector<uint64_t> &materialBufferAddrs,
-                                       std::vector<uint64_t> &lastVertexBufferAddrs,
                                        std::vector<uint64_t> &lastIndexBufferAddrs,
                                        std::vector<uint64_t> &lastPositionBufferAddrs,
                                        std::vector<glm::mat4> &lastObjToWorldMats) {
@@ -56,12 +54,6 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data());
-
-    vertexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, vertexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data());
 
     indexBufferAddr = vk::DeviceLocalBuffer::create(
         vma, device, indexBufferAddrs.size() * sizeof(uint64_t),
@@ -80,12 +72,6 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     materialBufferAddr->uploadToStagingBuffer(materialBufferAddrs.data());
-
-    lastVertexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, lastVertexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data());
 
     lastIndexBufferAddr = vk::DeviceLocalBuffer::create(
         vma, device, lastIndexBufferAddrs.size() * sizeof(uint64_t),
@@ -107,11 +93,9 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
         blasOffsetsBuffer,
-        vertexBufferAddr,
         indexBufferAddr,
         positionBufferAddr,
         materialBufferAddr,
-        lastVertexBufferAddr,
         lastIndexBufferAddr,
         lastPositionBufferAddr,
         lastObjToWorldMat,
@@ -157,7 +141,6 @@ void WorldPrepareContext::render() {
     auto worldPrepare1 = worldPrepare.lock();
     if (rayTracingModule == nullptr) { return; }
     if (worldPrepare1 == nullptr) { return; }
-    const uint32_t shadowHitGroupIndex = rayTracingModule->shadowHitGroupIndex();
 
     std::shared_ptr<Framework> framework = Renderer::instance().framework();
     std::shared_ptr<FrameworkContext> context = frameworkContext.lock();
@@ -170,13 +153,13 @@ void WorldPrepareContext::render() {
     auto entities = Renderer::instance().world()->entities();
     auto cameraPos = Renderer::instance().world()->getCameraPos();
 
-    std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
-
-    if (chunks->chunkBuildScheduler() != nullptr) {
-        chunks->chunkBuildScheduler()->tryCheckBatchesFinish();
-        chunks->chunkBuildScheduler()->tryScheduleBatches(
-            Renderer::instance().world()->chunks()->chunkBuildScheduler()->chunkBuildingBatchSize());
+    auto chunkBuildScheduler = chunks->chunkBuildScheduler();
+    if (chunkBuildScheduler != nullptr) {
+        chunkBuildScheduler->tryCheckBatchesFinish();
+        chunkBuildScheduler->tryScheduleBatches(chunkBuildScheduler->chunkBuildingBatchSize());
     }
+
+    std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
 
     if (chunks->importantBLASBuilders().size() > 0) {
         vk::BLASBuilder::batchSubmit(chunks->importantBLASBuilders(), worldCommandBuffer);
@@ -194,10 +177,10 @@ void WorldPrepareContext::render() {
 
     uint32_t blasAccu = 0, blasGroupAccu = 0;
     std::vector<uint32_t> blasOffset;
-    std::vector<uint32_t> hitGroupIndices;
-    std::vector<uint64_t> vertexBufferAddrs, indexBufferAddrs;
+    hitGroupNames.clear();
+    std::vector<uint64_t> indexBufferAddrs;
     std::vector<uint64_t> positionBufferAddrs, materialBufferAddrs;
-    std::vector<uint64_t> lastVertexBufferAddrs, lastIndexBufferAddrs;
+    std::vector<uint64_t> lastIndexBufferAddrs;
     std::vector<uint64_t> lastPositionBufferAddrs;
     std::vector<glm::mat4> lastObjToWorldMats;
 
@@ -214,8 +197,9 @@ void WorldPrepareContext::render() {
             auto &previousEntityRenderDataBatches = worldPrepare1->previousEntityRenderDataBatches_;
             auto &emptyEntityRenderDataBatch = worldPrepare1->emptyEntityRenderDataBatch_;
 
-            auto &previousEntityRenderDataBatch =
-                previousEntityRenderDataBatches.empty() ? emptyEntityRenderDataBatch : previousEntityRenderDataBatches.back();
+            auto &previousEntityRenderDataBatch = previousEntityRenderDataBatches.empty() ?
+                                                      emptyEntityRenderDataBatch :
+                                                      previousEntityRenderDataBatches.back();
             if (previousEntityRenderDataBatches.size() > Renderer::instance().framework()->swapchain()->imageCount())
                 previousEntityRenderDataBatches.pop();
             auto &currentEntityRenderDataBatch = previousEntityRenderDataBatches.emplace();
@@ -253,37 +237,35 @@ void WorldPrepareContext::render() {
                         };
                     }
 
-                    instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rayTracingFlag, blasGroupAccu, flags,
-                                                   entities1[i]->blas);
+                    instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rayTracingFlag, blasGroupAccu,
+                                                   flags, entities1[i]->blas);
                 } else {
                     // auto &prebuiltBLAS =
                     //     Renderer::instance().framework()->prebuiltBLASs()[entityRenderData->prebuiltBLAS];
                     // transform = prebuiltBLAS.align(*entityRenderData->vertices, *entityRenderData->indices);
 
-                    // instanceBuilder.defineInstance(transform, blasIndex, entityRenderData->rayTracingFlag, blasGroupAccu,
-                    // flags,
+                    // instanceBuilder.defineInstance(transform, blasIndex, entityRenderData->rayTracingFlag,
+                    // blasGroupAccu, flags,
                     //                                prebuiltBLAS.blas);
                     throw std::runtime_error("prebuilt blas not implemented yet!");
                 }
 
-                hitGroupIndices.push_back(shadowHitGroupIndex);
+                hitGroupNames.push_back("shadow");
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
                     const std::string &groupName =
                         entities1[i]->geometryGroupNames != nullptr &&
-                                j < static_cast<int>(entities1[i]->geometryGroupNames->size())
-                            ? (*entities1[i]->geometryGroupNames)[j]
-                            : "default";
-                    hitGroupIndices.push_back(rayTracingModule->hitGroupIndexForName(groupName));
+                                j < static_cast<int>(entities1[i]->geometryGroupNames->size()) ?
+                            (*entities1[i]->geometryGroupNames)[j] :
+                            "default";
+                    hitGroupNames.push_back(groupName);
                 }
 
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
-                    vertexBufferAddrs.push_back((*entities1[i]->vertexBufferAddresses)[j]);
                     indexBufferAddrs.push_back((*entities1[i]->indexBufferAddresses)[j]);
                     positionBufferAddrs.push_back((*entities1[i]->positionBufferAddresses)[j]);
                     materialBufferAddrs.push_back((*entities1[i]->materialBufferAddresses)[j]);
                 }
 
-                // store current render data
                 {
                     if (entities1[i]->hashCode) {
                         currentEntityRenderDataBatch[entities1[i]->hashCode].first = entities1[i];
@@ -291,7 +273,6 @@ void WorldPrepareContext::render() {
                     }
                 }
 
-                // read previous render data
                 {
                     glm::mat4 lastObjToWorldMat(1);
                     auto iter = previousEntityRenderDataBatch.find(entities1[i]->hashCode);
@@ -299,25 +280,19 @@ void WorldPrepareContext::render() {
                         auto &previousEntityRenderData = (*iter).second.first;
                         if (previousEntityRenderData->geometryCount == entities1[i]->geometryCount) {
                             for (int j = 0; j < entities1[i]->geometryCount; j++) {
-                                if ((*previousEntityRenderData->vertices)[j].size() ==
-                                        (*entities1[i]->vertices)[j].size() &&
-                                    (*previousEntityRenderData->indices)[j].size() ==
-                                        (*entities1[i]->indices)[j].size()) {
-                                    lastVertexBufferAddrs.push_back(
-                                        (*previousEntityRenderData->vertexBufferAddresses)[j]);
+                                if ((*previousEntityRenderData->vertexCounts)[j] == (*entities1[i]->vertexCounts)[j] &&
+                                    (*previousEntityRenderData->indexCounts)[j] == (*entities1[i]->indexCounts)[j]) {
                                     lastIndexBufferAddrs.push_back(
                                         (*previousEntityRenderData->indexBufferAddresses)[j]);
                                     lastPositionBufferAddrs.push_back(
                                         (*previousEntityRenderData->positionBufferAddresses)[j]);
                                 } else {
-                                    lastVertexBufferAddrs.push_back(0);
                                     lastIndexBufferAddrs.push_back(0);
                                     lastPositionBufferAddrs.push_back(0);
                                 }
                             }
                         } else {
                             for (int j = 0; j < entities1[i]->geometryCount; j++) {
-                                lastVertexBufferAddrs.push_back(0);
                                 lastIndexBufferAddrs.push_back(0);
                                 lastPositionBufferAddrs.push_back(0);
                             }
@@ -330,7 +305,6 @@ void WorldPrepareContext::render() {
                                                                      glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)));
                     } else {
                         for (int j = 0; j < entities1[i]->geometryCount; j++) {
-                            lastVertexBufferAddrs.push_back(0);
                             lastIndexBufferAddrs.push_back(0);
                             lastPositionBufferAddrs.push_back(0);
                         }
@@ -340,7 +314,7 @@ void WorldPrepareContext::render() {
 
                 blasOffset.push_back(blasAccu);
                 blasAccu += entities1[i]->geometryCount;
-                blasGroupAccu += entities1[i]->geometryCount + 1; // shadow
+                blasGroupAccu += entities1[i]->geometryCount + 1;
 
                 blasIndex++;
             }
@@ -353,6 +327,7 @@ void WorldPrepareContext::render() {
         for (int i = 0; i < chunk1s.size(); i++) {
             auto &chunk1 = chunk1s[i];
             if (chunk1->blas == nullptr) continue;
+            chunk1->retainResources(framework->frameResourceRetainer());
 
             VkTransformMatrixKHR transform = {
                 1, 0, 0, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x), //
@@ -362,26 +337,23 @@ void WorldPrepareContext::render() {
 
             instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunk1->blas);
 
-            hitGroupIndices.push_back(shadowHitGroupIndex);
+            hitGroupNames.push_back("shadow");
             for (int j = 0; j < chunk1->geometryCount; j++) {
                 const std::string &groupName =
-                    chunk1->geometryGroupNames != nullptr && j < static_cast<int>(chunk1->geometryGroupNames->size())
-                        ? (*chunk1->geometryGroupNames)[j]
-                        : "default";
-                hitGroupIndices.push_back(rayTracingModule->hitGroupIndexForName(groupName));
+                    chunk1->geometryGroupNames != nullptr && j < static_cast<int>(chunk1->geometryGroupNames->size()) ?
+                        (*chunk1->geometryGroupNames)[j] :
+                        "default";
+                hitGroupNames.push_back(groupName);
             }
 
             for (int j = 0; j < chunk1->geometryCount; j++) {
-                vertexBufferAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
-                indexBufferAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
-                positionBufferAddrs.push_back((*chunk1->positionBuffers)[j]->bufferAddress());
-                materialBufferAddrs.push_back((*chunk1->materialBuffers)[j]->bufferAddress());
-                lastVertexBufferAddrs.push_back(0);
+                indexBufferAddrs.push_back((*chunk1->indexBufferAddresses)[j]);
+                positionBufferAddrs.push_back((*chunk1->positionBufferAddresses)[j]);
+                materialBufferAddrs.push_back((*chunk1->materialBufferAddresses)[j]);
                 lastIndexBufferAddrs.push_back(0);
                 lastPositionBufferAddrs.push_back(0);
             }
 
-            // read (fake, since chunk is not moving) previous render data
             {
                 glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
                     glm::vec4(1.0f, 0.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x)), //
@@ -393,7 +365,7 @@ void WorldPrepareContext::render() {
 
             blasOffset.push_back(blasAccu);
             blasAccu += chunk1->geometryCount;
-            blasGroupAccu += chunk1->geometryCount + 1; // shadow
+            blasGroupAccu += chunk1->geometryCount + 1;
 
             blasIndex++;
         }
@@ -417,9 +389,29 @@ void WorldPrepareContext::render() {
         .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
     }});
 
-    rayTracingContext->sharcUpdateSbt->setupHitSBT(hitGroupIndices);
-    rayTracingContext->sharcQuerySbt->setupHitSBT(hitGroupIndices);
+    uploadBuffer(blasOffset, indexBufferAddrs, positionBufferAddrs, materialBufferAddrs, lastIndexBufferAddrs,
+                 lastPositionBufferAddrs, lastObjToWorldMats);
+}
 
-    uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, positionBufferAddrs, materialBufferAddrs,
-                 lastVertexBufferAddrs, lastIndexBufferAddrs, lastPositionBufferAddrs, lastObjToWorldMats);
+void WorldPrepareContext::setupHitGroupSbt(const std::unordered_map<std::string, uint32_t> &hitGroupNameToIndex,
+                                           uint32_t fallbackHitGroupIndex,
+                                           uint32_t shadowHitGroupIndex,
+                                           std::shared_ptr<vk::CommandBuffer> commandBuffer,
+                                           std::shared_ptr<vk::SBT> updateSbt,
+                                           std::shared_ptr<vk::SBT> querySbt) {
+    std::vector<uint32_t> hitGroupIndices;
+    hitGroupIndices.reserve(hitGroupNames.size());
+
+    for (const std::string &groupName : hitGroupNames) {
+        if (groupName == "shadow") {
+            hitGroupIndices.push_back(shadowHitGroupIndex);
+            continue;
+        }
+
+        auto iter = hitGroupNameToIndex.find(groupName);
+        hitGroupIndices.push_back(iter == hitGroupNameToIndex.end() ? fallbackHitGroupIndex : iter->second);
+    }
+
+    if (updateSbt != nullptr) { updateSbt->setupHitSBT(hitGroupIndices, commandBuffer); }
+    if (querySbt != nullptr) { querySbt->setupHitSBT(hitGroupIndices, commandBuffer); }
 }

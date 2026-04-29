@@ -7,6 +7,7 @@
 #include "core/render/pipeline.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
+#include <chrono>
 #include <map>
 #include <mutex>
 
@@ -14,19 +15,18 @@ class Framework;
 class UIModule;
 struct UIModuleContext;
 
-class GarbageCollector : public SharedObject<GarbageCollector> {
+class FrameResourceRetainer : public SharedObject<FrameResourceRetainer> {
   public:
-    GarbageCollector(std::shared_ptr<Framework> framework);
+    FrameResourceRetainer(std::shared_ptr<Framework> framework);
 
     template <typename T>
-    void collect(std::shared_ptr<T> garbage);
+    void retain(std::shared_ptr<T> resource);
 
-    void clear(uint32_t index);
+    void beginFrame(uint32_t frameIndex);
 
   private:
-    std::weak_ptr<Framework> framework_;
-    std::vector<std::vector<std::shared_ptr<void>>> collectors_;
-    uint32_t index_ = 0;
+    std::vector<std::vector<std::shared_ptr<void>>> retainedResourcesByFrame_;
+    uint32_t currentFrameIndex_ = 0;
     std::recursive_mutex mtx_;
 };
 
@@ -60,7 +60,7 @@ struct FrameworkContext : public SharedObject<FrameworkContext> {
 
 class Framework : public SharedObject<Framework> {
     friend FrameworkContext;
-    friend GarbageCollector;
+    friend FrameResourceRetainer;
 
   public:
     Framework();
@@ -99,11 +99,13 @@ class Framework : public SharedObject<Framework> {
 
     std::shared_ptr<Pipeline> pipeline();
 
-    GarbageCollector &gc();
+    FrameResourceRetainer &frameResourceRetainer();
 
   private:
     std::shared_ptr<vk::Semaphore> acquireSemaphore();
     void recycleSemaphore(std::shared_ptr<vk::Semaphore> semaphore);
+    uint32_t effectiveFrameRateLimit() const;
+    void limitFrameRate();
 
   private:
     std::shared_ptr<vk::Instance> instance_;
@@ -136,20 +138,23 @@ class Framework : public SharedObject<Framework> {
     std::recursive_mutex recreateMtx_;
 
     bool running_ = true;
+    std::chrono::steady_clock::time_point frameLimitAnchor_{};
+    uint32_t frameLimitFps_ = 0;
 
-    std::shared_ptr<GarbageCollector> gc_;
+    std::shared_ptr<FrameResourceRetainer> frameResourceRetainer_;
 };
 
 template <typename T>
-void GarbageCollector::collect(std::shared_ptr<T> garbage) {
+void FrameResourceRetainer::retain(std::shared_ptr<T> resource) {
     std::unique_lock<std::recursive_mutex> lck(mtx_);
-    
-    if (garbage != nullptr) {
-        collectors_[index_].push_back(garbage);
+
+    if (resource != nullptr) {
+        retainedResourcesByFrame_[currentFrameIndex_].push_back(resource);
 
 #ifdef DEBUG
         if constexpr (std::is_same_v<T, vk::DeviceLocalImage>) {
-            std::cout << "Garbage collector enqueued image (" << garbage->debugName << ") in frame: " << index_
+            std::cout << "Frame resource retainer enqueued image (" << resource->debugName
+                      << ") in frame: " << currentFrameIndex_
                       << std::endl;
         }
 #endif

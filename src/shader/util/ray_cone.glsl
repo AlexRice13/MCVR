@@ -55,9 +55,4 @@ float lodWithCone(sampler2D tex, vec2 uv, float coneRadiusWorld, vec3 dposdu, ve
     return lod;
 }
 
-float roughnessToExtraSpread(float roughness) {
-    float extraTheta = roughness * 0.35;
-    return tan(extraTheta);
-}
-
 #endif

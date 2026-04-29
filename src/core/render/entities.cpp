@@ -9,12 +9,40 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <unordered_map>
 
 using Vertex = glm::vec3;
 using Triangle = std::array<Vertex, 3>;
 using VertexIdentifier = std::array<uint32_t, 2>;
 using TriangleIdentifier = std::array<VertexIdentifier, 3>;
+
+namespace {
+
+const char *postRenderFlagName(int postRenderFlag) {
+    switch (postRenderFlag) {
+        case 0b0001: return "WEATHER";
+        case 0b0010: return "PARTICLE";
+        case 0b0100: return "TEXT";
+        case 0b1000: return "NAME_TAG";
+        default: return "UNKNOWN";
+    }
+}
+
+// void logPostContentNameOnce(int postRenderFlag, const std::string &contentName) {
+//     static std::mutex mutex;
+//     static std::set<std::string> loggedKeys;
+
+//     const std::string flagName = postRenderFlagName(postRenderFlag);
+//     const std::string key = flagName + "|" + contentName;
+
+//     std::lock_guard<std::mutex> lock(mutex);
+//     if (!loggedKeys.insert(key).second) { return; }
+
+//     std::cerr << "[PostContent-Native] flag=" << flagName << " content=" << contentName << std::endl;
+// }
+
+}
 
 struct TriangleHash {
     static inline void hash_combine(std::size_t &seed, std::size_t h) noexcept {
@@ -28,17 +56,38 @@ struct TriangleHash {
     }
 };
 
+static void buildEntityPackedVertices(const std::vector<std::vector<vk::VertexFormat::PBRVertex>> &vertices,
+                                      const std::vector<std::vector<uint32_t>> &indices,
+                                      std::vector<vk::VertexFormat::PositionVertex> &packedPositions,
+                                      std::vector<vk::VertexFormat::MaterialVertex> &packedMaterials,
+                                      std::vector<uint32_t> &packedIndices) {
+    for (int i = 0; i < static_cast<int>(vertices.size()); i++) {
+        const auto &geometryVertices = vertices[i];
+        const auto &geometryIndices = indices[i];
+
+        packedIndices.insert(packedIndices.end(), geometryIndices.begin(), geometryIndices.end());
+
+        auto positionVertices = vk::Vertex::buildPositionVertices(geometryVertices);
+        packedPositions.insert(packedPositions.end(), positionVertices.begin(), positionVertices.end());
+
+        auto materialVertices = vk::Vertex::buildMaterialVertices(geometryVertices);
+        packedMaterials.insert(packedMaterials.end(), materialVertices.begin(), materialVertices.end());
+    }
+}
+
 
 EntityBuildData::EntityBuildData(int hashCode,
                                  double x,
                                  double y,
                                  double z,
                                  int rayTracingFlag,
+                                 int postRenderFlag,
                                  int prebuiltBLAS,
                                  World::Coordinates coordinate,
                                  uint32_t geometryCount,
                                  std::vector<World::GeometryTypes> &&geometryTypes,
                                  std::vector<std::string> &&geometryGroupNames,
+                                 std::vector<std::string> &&geometryContentNames,
                                  std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                                  std::vector<std::vector<uint32_t>> &&indices)
     : hashCode(hashCode),
@@ -46,14 +95,15 @@ EntityBuildData::EntityBuildData(int hashCode,
       y(y),
       z(z),
       rayTracingFlag(rayTracingFlag),
+      postRenderFlag(postRenderFlag),
       prebuiltBLAS(prebuiltBLAS),
       coordinate(coordinate),
       geometryCount(geometryCount),
       geometryTypes(std::move(geometryTypes)),
       geometryGroupNames(std::move(geometryGroupNames)),
+      geometryContentNames(std::move(geometryContentNames)),
       vertices(std::move(vertices)),
       indices(std::move(indices)),
-      vertexBufferAddresses(),
       indexBufferAddresses(),
       positionBufferAddresses(),
       materialBufferAddresses() {}
@@ -69,8 +119,8 @@ void EntityBuildDataBatch::build() {
     auto physicalDevice = framework->physicalDevice();
 
     std::vector<uint32_t> instanceOffsets;
-    std::vector<uint32_t> geometryVertexOffsets; // number of vertices to skip
-    std::vector<uint32_t> geometryIndexOffsets;  // number of indices to skip
+    std::vector<uint32_t> geometryVertexOffsets;
+    std::vector<uint32_t> geometryIndexOffsets;
     uint32_t totalGeometryCount = 0;
     uint32_t totalVertexCount = 0;
     uint32_t totalIndexCount = 0;
@@ -88,48 +138,37 @@ void EntityBuildDataBatch::build() {
         totalGeometryCount += data->geometryCount;
     }
 
-    vertexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalVertexCount * sizeof(vk::VertexFormat::PBRVertex),
+    positionBuffer = vk::DeviceLocalBuffer::create(
+        vma, device, false, totalVertexCount * sizeof(vk::VertexFormat::PositionVertex),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    positionBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalVertexCount * sizeof(vk::VertexFormat::PositionVertex),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     materialBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalVertexCount * sizeof(vk::VertexFormat::MaterialVertex),
+        vma, device, false, totalVertexCount * sizeof(vk::VertexFormat::MaterialVertex),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     indexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalIndexCount * sizeof(uint32_t),
+        vma, device, false, totalIndexCount * sizeof(uint32_t),
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    vk::VertexFormat::PBRVertex *vertexPtr = static_cast<vk::VertexFormat::PBRVertex *>(vertexBuffer->mappedPtr());
-    auto *positionPtr = static_cast<vk::VertexFormat::PositionVertex *>(positionBuffer->mappedPtr());
-    auto *materialPtr = static_cast<vk::VertexFormat::MaterialVertex *>(materialBuffer->mappedPtr());
-    uint32_t *indexPtr = static_cast<uint32_t *>(indexBuffer->mappedPtr());
+    std::vector<vk::VertexFormat::PositionVertex> packedPositions;
+    std::vector<vk::VertexFormat::MaterialVertex> packedMaterials;
+    std::vector<uint32_t> packedIndices;
+    packedPositions.reserve(totalVertexCount);
+    packedMaterials.reserve(totalVertexCount);
+    packedIndices.reserve(totalIndexCount);
     for (auto data : datas) {
-        for (int i = 0; i < data->geometryCount; i++) {
-            std::memcpy(vertexPtr, data->vertices[i].data(),
-                        data->vertices[i].size() * sizeof(vk::VertexFormat::PBRVertex));
-            vertexPtr += data->vertices[i].size();
-
-            auto positionVertices = vk::Vertex::buildPositionVertices(data->vertices[i]);
-            std::memcpy(positionPtr, positionVertices.data(),
-                        positionVertices.size() * sizeof(vk::VertexFormat::PositionVertex));
-            positionPtr += positionVertices.size();
-
-            auto materialVertices = vk::Vertex::buildMaterialVertices(data->vertices[i]);
-            std::memcpy(materialPtr, materialVertices.data(),
-                        materialVertices.size() * sizeof(vk::VertexFormat::MaterialVertex));
-            materialPtr += materialVertices.size();
-
-            std::memcpy(indexPtr, data->indices[i].data(), data->indices[i].size() * sizeof(uint32_t));
-            indexPtr += data->indices[i].size();
-        }
-
-        totalGeometryCount += data->geometryCount;
+        buildEntityPackedVertices(data->vertices, data->indices, packedPositions, packedMaterials, packedIndices);
     }
-    vertexBuffer->flushStagingBuffer();
+
+    if (!packedPositions.empty()) {
+        positionBuffer->uploadToStagingBuffer(packedPositions.data(),
+                                              packedPositions.size() * sizeof(vk::VertexFormat::PositionVertex), 0);
+        materialBuffer->uploadToStagingBuffer(packedMaterials.data(),
+                                              packedMaterials.size() * sizeof(vk::VertexFormat::MaterialVertex), 0);
+    }
+    if (!packedIndices.empty()) {
+        indexBuffer->uploadToStagingBuffer(packedIndices.data(), packedIndices.size() * sizeof(uint32_t), 0);
+    }
     positionBuffer->flushStagingBuffer();
     materialBuffer->flushStagingBuffer();
     indexBuffer->flushStagingBuffer();
@@ -146,9 +185,6 @@ void EntityBuildDataBatch::build() {
             blasGeometryBuilder = blasBuilder->beginGeometries();
         }
         for (int i = 0; i < data->geometryCount; i++) {
-            VkDeviceAddress vertexBufferAddress =
-                vertexBuffer->bufferAddress() +
-                geometryVertexOffsets[instanceOffset + i] * sizeof(vk::VertexFormat::PBRVertex);
             VkDeviceAddress indexBufferAddress =
                 indexBuffer->bufferAddress() + geometryIndexOffsets[instanceOffset + i] * sizeof(uint32_t);
             VkDeviceAddress positionBufferAddress =
@@ -157,13 +193,12 @@ void EntityBuildDataBatch::build() {
             VkDeviceAddress materialBufferAddress =
                 materialBuffer->bufferAddress() +
                 geometryVertexOffsets[instanceOffset + i] * sizeof(vk::VertexFormat::MaterialVertex);
-            data->vertexBufferAddresses.push_back(vertexBufferAddress);
             data->indexBufferAddresses.push_back(indexBufferAddress);
             data->positionBufferAddresses.push_back(positionBufferAddress);
             data->materialBufferAddresses.push_back(materialBufferAddress);
             if (data->prebuiltBLAS < 0) {
-                blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRVertex>(
-                    vertexBufferAddress, data->vertices[i].size(), indexBufferAddress, data->indices[i].size(),
+                blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PositionVertex>(
+                    positionBufferAddress, data->vertices[i].size(), indexBufferAddress, data->indices[i].size(),
                     data->geometryTypes[i] == World::WORLD_SOLID);
             }
         }
@@ -194,8 +229,6 @@ Entity::Entity(std::shared_ptr<EntityBuildData> chunkBuildData) {
     coordinate = chunkBuildData->coordinate;
 
     blas = chunkBuildData->blas;
-    vertexBufferAddresses =
-        std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->vertexBufferAddresses));
     indexBufferAddresses =
         std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->indexBufferAddresses));
     positionBufferAddresses =
@@ -204,54 +237,61 @@ Entity::Entity(std::shared_ptr<EntityBuildData> chunkBuildData) {
         std::make_shared<std::vector<VkDeviceAddress>>(std::move(chunkBuildData->materialBufferAddresses));
 
     geometryCount = chunkBuildData->geometryCount;
-    geometryTypes = std::make_shared<std::vector<World::GeometryTypes>>(std::move(chunkBuildData->geometryTypes));
     geometryGroupNames = std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryGroupNames));
-    vertices =
-        std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRVertex>>>(std::move(chunkBuildData->vertices));
-    indices = std::make_shared<std::vector<std::vector<uint32_t>>>(std::move(chunkBuildData->indices));
+    geometryContentNames =
+        std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryContentNames));
+    vertexCounts = std::make_shared<std::vector<uint32_t>>();
+    indexCounts = std::make_shared<std::vector<uint32_t>>();
+    vertexCounts->reserve(geometryCount);
+    indexCounts->reserve(geometryCount);
+    for (uint32_t i = 0; i < geometryCount; i++) {
+        vertexCounts->push_back(static_cast<uint32_t>(chunkBuildData->vertices[i].size()));
+        indexCounts->push_back(static_cast<uint32_t>(chunkBuildData->indices[i].size()));
+    }
 }
 
 EntityBatch::EntityBatch(std::shared_ptr<EntityBuildDataBatch> entityBuildDataBatch) {
     for (auto data : entityBuildDataBatch->datas) {
         auto entity = Entity::create(data);
-        entity->vertexBuffer = entityBuildDataBatch->vertexBuffer;
         entity->indexBuffer = entityBuildDataBatch->indexBuffer;
         entity->positionBuffer = entityBuildDataBatch->positionBuffer;
         entity->materialBuffer = entityBuildDataBatch->materialBuffer;
         entities.push_back(entity);
     }
 
-    vertexBuffer = entityBuildDataBatch->vertexBuffer;
     indexBuffer = entityBuildDataBatch->indexBuffer;
     positionBuffer = entityBuildDataBatch->positionBuffer;
     materialBuffer = entityBuildDataBatch->materialBuffer;
 }
 
 EntityPost::EntityPost(std::shared_ptr<EntityBuildData> chunkBuildData) {
+    postRenderFlag = chunkBuildData->postRenderFlag;
     x = chunkBuildData->x;
     y = chunkBuildData->y;
     z = chunkBuildData->z;
 
     geometryCount = chunkBuildData->geometryCount;
-    vertices = std::move(chunkBuildData->vertices);
-    indices = std::move(chunkBuildData->indices);
+    geometryContentNames = std::move(chunkBuildData->geometryContentNames);
+    indexCounts.reserve(geometryCount);
 
     auto framework = Renderer::instance().framework();
     auto vma = framework->vma();
     auto device = framework->device();
-    auto physicalDevice = framework->physicalDevice();
 
     for (int i = 0; i < geometryCount; i++) {
         auto vertexBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        auto indexBuffer = vk::DeviceLocalBuffer::create(vma, device, indices[i].size() * sizeof(uint32_t),
+            vma, device, false, chunkBuildData->vertices[i].size() * sizeof(vk::VertexFormat::PBRVertex),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        auto indexBuffer = vk::DeviceLocalBuffer::create(vma, device, false,
+                                                         chunkBuildData->indices[i].size() * sizeof(uint32_t),
                                                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
-        vertexBuffer->uploadToStagingBuffer(vertices[i].data());
-        indexBuffer->uploadToStagingBuffer(indices[i].data());
+        vertexBuffer->uploadToStagingBuffer(chunkBuildData->vertices[i].data());
+        indexBuffer->uploadToStagingBuffer(chunkBuildData->indices[i].data());
 
         vertexBuffers.push_back(vertexBuffer);
         indexBuffers.push_back(indexBuffer);
+        indexCounts.push_back(static_cast<uint32_t>(chunkBuildData->indices[i].size()));
     }
 }
 
@@ -264,21 +304,21 @@ Entities::Entities(std::shared_ptr<Framework> framework) {}
 void Entities::resetFrame() {
     auto framework = Renderer::instance().framework();
     framework->safeAcquireCurrentContext();
-    auto &gc = framework->gc();
+    auto &frr = framework->frameResourceRetainer();
 
-    gc.collect(entityBuildDataBatch_);
+    frr.retain(entityBuildDataBatch_);
     entityBuildDataBatch_ = EntityBuildDataBatch::create();
 
-    gc.collect(entityPostBuildDataBatch_);
+    frr.retain(entityPostBuildDataBatch_);
     entityPostBuildDataBatch_ = EntityPostBuildDataBatch::create();
 
-    gc.collect(entityBatch_);
+    frr.retain(entityBatch_);
     entityBatch_ = nullptr;
 
-    gc.collect(entityPostBatch_);
+    frr.retain(entityPostBatch_);
     entityPostBatch_ = nullptr;
 
-    gc.collect(blasBatchBuilder_);
+    frr.retain(blasBatchBuilder_);
     blasBatchBuilder_ = nullptr;
 }
 
@@ -300,13 +340,15 @@ void Entities::queueBuild(EntitiesBuildTask task) {
         uint32_t allVertexCount = 0, allIndexCount = 0;
         std::vector<World::GeometryTypes> geometryTypes;
         std::vector<std::string> geometryGroupNames;
+        std::vector<std::string> geometryContentNames;
         std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
         std::vector<std::vector<uint32_t>> indices;
         int hashCode = task.entityHashCodes[e];
         double x = task.entityXs[e];
         double y = task.entityYs[e];
         double z = task.entityZs[e];
-        int rayTracingFlag = task.entityRTFlags[e];
+        int rayTracingFlag = task.entityRayTracingFlags[e];
+        int postRenderFlag = task.entityPostRenderFlags[e];
         int prebuiltBLAS = task.entityPrebuiltBLASs[e];
         World::Coordinates coordinate = task.coordinate;
         bool post = task.entityPosts[e];
@@ -322,6 +364,14 @@ void Entities::queueBuild(EntitiesBuildTask task) {
             } else {
                 geometryGroupNames.emplace_back("Entity");
             }
+            if (task.geometryContentNames != nullptr && task.geometryContentNames[geometryIndex + i] != nullptr) {
+                geometryContentNames.emplace_back(task.geometryContentNames[geometryIndex + i]);
+            } else {
+                geometryContentNames.emplace_back("");
+            }
+            // if (post && postRenderFlag != 0) {
+            //     logPostContentNameOnce(postRenderFlag, geometryContentNames.back());
+            // }
 
             auto &geometryVertices = vertices.emplace_back();
             auto &geometryIndices = indices.emplace_back();
@@ -879,6 +929,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                 indices.pop_back();
                 geometryTypes.pop_back();
                 geometryGroupNames.pop_back();
+                geometryContentNames.pop_back();
             } else {
                 allVertexCount += geometryVertices.size();
                 allIndexCount += geometryIndices.size();
@@ -889,9 +940,10 @@ void Entities::queueBuild(EntitiesBuildTask task) {
         if (geometryCountWithoutGlint == 0) { continue; }
 
         std::shared_ptr<EntityBuildData> chunkBuildData =
-            EntityBuildData::create(hashCode, x, y, z, rayTracingFlag, prebuiltBLAS, coordinate, geometryCountWithoutGlint,
-                                    std::move(geometryTypes), std::move(geometryGroupNames), std::move(vertices),
-                                    std::move(indices));
+            EntityBuildData::create(hashCode, x, y, z, rayTracingFlag, postRenderFlag, prebuiltBLAS, coordinate,
+                                    geometryCountWithoutGlint,
+                                    std::move(geometryTypes), std::move(geometryGroupNames),
+                                    std::move(geometryContentNames), std::move(vertices), std::move(indices));
 
         if (post) {
             entityPostBuildDataBatch_->addData(chunkBuildData);
@@ -914,8 +966,7 @@ void Entities::build() {
 
     entityBuildDataBatch_->build();
 
-    Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->vertexBuffer,
-                                                              entityBuildDataBatch_->indexBuffer);
+    Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->indexBuffer);
     Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->positionBuffer);
     Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->materialBuffer);
     blasBatchBuilder_ = entityBuildDataBatch_->blasBatchBuilder;

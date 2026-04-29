@@ -322,7 +322,6 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
         if (localH.z < 0.0) localH = -localH;
         localL = normalize(reflect(-localV, localH));
     } else { // Glass
-        lobeType = 2;
         float a = mat.roughness * mat.roughness; // Isotropic
         vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);
         if (localH.z < 0.0) localH = -localH;
@@ -334,8 +333,10 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
         float r_glass = (r3 - cdf2) / (1.0 - cdf2 + 1e-5);
 
         if (r_glass < F) {
+            lobeType = 1;
             localL = normalize(reflect(-localV, localH));
         } else {
+            lobeType = 2;
             localL = normalize(refract(-localV, localH, eta));
         }
     }
@@ -344,6 +345,59 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     V = ToWorld(T, B, N, localV);
 
     return DisneyEval(mat, V, N, L, pdf);
+}
+
+vec3 DisneySampleSpecularRefraction(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed) {
+    pdf = 0.0;
+    L = vec3(0.0);
+
+    vec3 T, B;
+    Onb(N, T, B);
+
+    vec3 localV = ToLocal(T, B, N, V);
+    float absVZ = abs(localV.z);
+    if (absVZ <= 1e-6 || mat.transmission <= 0.0 || mat.metallic >= 1.0) { return vec3(0.0); }
+
+    float a = mat.roughness * mat.roughness;
+    float eta = (localV.z > 0.0) ? (1.0 / mat.ior) : mat.ior;
+    vec3 localH = vec3(0.0);
+    vec3 localL = vec3(0.0);
+
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        float r1 = rand(seed);
+        float r2 = rand(seed);
+        localH = SampleGGXVNDF(localV, a, a, r1, r2);
+        if (localH.z < 0.0) localH = -localH;
+
+        localL = refract(-localV, localH, eta);
+        if (dot(localL, localL) > 1e-6) {
+            localL = normalize(localL);
+            break;
+        }
+    }
+
+    if (dot(localL, localL) <= 1e-6) { return vec3(0.0); }
+
+    float VDotH = abs(dot(localV, localH));
+    float F = DielectricFresnel(VDotH, eta);
+    float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
+    float G1 = SmithGAniso(absVZ, localV.x, localV.y, a, a);
+    float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
+
+    float denom = dot(localL, localH) + dot(localV, localH) * eta;
+    denom *= denom;
+    if (denom <= 1e-10) { return vec3(0.0); }
+
+    float jacobian = abs(dot(localL, localH)) / denom;
+    pdf = G1 * max(0.0, VDotH) * D * jacobian / absVZ;
+    if (pdf <= 1e-6) { return vec3(0.0); }
+
+    vec3 transColor = pow(max(mat.albedo, vec3(0.0)), vec3(0.5)) * (1.0 - F) * D * G2 *
+                      abs(dot(localV, localH)) * jacobian * (eta * eta) / max(abs(localL.z * localV.z), 1e-6);
+    vec3 f = transColor * ((1.0 - mat.metallic) * mat.transmission);
+
+    L = ToWorld(T, B, N, localL);
+    return f * abs(localL.z);
 }
 
 #endif

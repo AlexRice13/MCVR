@@ -92,5 +92,4 @@ float rand(inout uint seed) {
     return float(r) * (1.F / float(0xffffffffu));
 }
 
-
 #endif // RANDOM_GLSL

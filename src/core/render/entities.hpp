@@ -30,12 +30,14 @@ struct EntitiesBuildTask {
     double *entityXs;
     double *entityYs;
     double *entityZs;
-    int *entityRTFlags;
+    int *entityRayTracingFlags;
+    int *entityPostRenderFlags;
     int *entityPrebuiltBLASs;
     int *entityPosts;
     int *entityGeometryCounts;
     int *geometryTypes;
     const char **geometryGroupNames;
+    const char **geometryContentNames;
     int *geometryTextures;
     int *vertexFormats;
     int *indexFormats;
@@ -47,14 +49,15 @@ struct EntityBuildData : public SharedObject<EntityBuildData> {
     int hashCode;
     double x, y, z;
     int rayTracingFlag;
+    int postRenderFlag;
     int prebuiltBLAS;
     World::Coordinates coordinate;
     uint32_t geometryCount;
     std::vector<World::GeometryTypes> geometryTypes;
     std::vector<std::string> geometryGroupNames;
+    std::vector<std::string> geometryContentNames;
     std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
-    std::vector<VkDeviceAddress> vertexBufferAddresses;
     std::vector<VkDeviceAddress> indexBufferAddresses;
     std::vector<VkDeviceAddress> positionBufferAddresses;
     std::vector<VkDeviceAddress> materialBufferAddresses;
@@ -65,11 +68,13 @@ struct EntityBuildData : public SharedObject<EntityBuildData> {
                     double y,
                     double z,
                     int rayTracingFlag,
+                    int postRenderFlag,
                     int prebuiltBLAS,
                     World::Coordinates coordinate,
                     uint32_t geometryCount,
                     std::vector<World::GeometryTypes> &&geometryTypes,
                     std::vector<std::string> &&geometryGroupNames,
+                    std::vector<std::string> &&geometryContentNames,
                     std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                     std::vector<std::vector<uint32_t>> &&indices);
 };
@@ -77,7 +82,6 @@ struct EntityBuildData : public SharedObject<EntityBuildData> {
 struct EntityBuildDataBatch : public SharedObject<EntityBuildDataBatch> {
     std::vector<std::shared_ptr<EntityBuildData>> datas;
 
-    std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> positionBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> materialBuffer;
@@ -106,20 +110,18 @@ struct Entity : public SharedObject<Entity> {
     World::Coordinates coordinate;
 
     std::shared_ptr<vk::BLAS> blas;
-    std::shared_ptr<std::vector<VkDeviceAddress>> vertexBufferAddresses;
     std::shared_ptr<std::vector<VkDeviceAddress>> indexBufferAddresses;
     std::shared_ptr<std::vector<VkDeviceAddress>> positionBufferAddresses;
     std::shared_ptr<std::vector<VkDeviceAddress>> materialBufferAddresses;
-    std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> positionBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> materialBuffer;
 
     uint32_t geometryCount;
-    std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::string>> geometryGroupNames;
-    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRVertex>>> vertices;
-    std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
+    std::shared_ptr<std::vector<std::string>> geometryContentNames;
+    std::shared_ptr<std::vector<uint32_t>> vertexCounts;
+    std::shared_ptr<std::vector<uint32_t>> indexCounts;
 
     Entity(std::shared_ptr<EntityBuildData> entityBuildData);
 };
@@ -127,7 +129,6 @@ struct Entity : public SharedObject<Entity> {
 struct EntityBatch : public SharedObject<EntityBatch> {
     std::vector<std::shared_ptr<Entity>> entities;
 
-    std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> positionBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> materialBuffer;
@@ -136,11 +137,12 @@ struct EntityBatch : public SharedObject<EntityBatch> {
 };
 
 struct EntityPost : public SharedObject<EntityPost> {
+    int postRenderFlag;
     double x, y, z;
 
     uint32_t geometryCount;
-    std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
-    std::vector<std::vector<uint32_t>> indices;
+    std::vector<std::string> geometryContentNames;
+    std::vector<uint32_t> indexCounts;
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> vertexBuffers;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> indexBuffers;

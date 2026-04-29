@@ -5,6 +5,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+
 XessSrModule::XessSrModule() {}
 
 bool XessSrModule::isQualityModeAttributeKey(const std::string &key) {
@@ -183,9 +185,12 @@ void XessSrModule::build() {
         contexts_[i]->inputDepthImage = inputImages_[i][1];
         contexts_[i]->inputMotionVectorImage = inputImages_[i][2];
         contexts_[i]->inputFirstHitDepthImage = inputImages_[i][3];
+        contexts_[i]->inputNormalRoughnessImage = inputImages_[i][4];
 
         contexts_[i]->outputImage = outputImages_[i][0];
         contexts_[i]->upscaledFirstHitDepthImage = outputImages_[i][1];
+        contexts_[i]->upscaledMotionVectorImage = outputImages_[i][2];
+        contexts_[i]->upscaledNormalRoughnessImage = outputImages_[i][3];
 
         contexts_[i]->depthDescriptorTable = depthDescriptorTables_[i];
         contexts_[i]->deviceDepthImage = deviceDepthImages_[i];
@@ -226,6 +231,24 @@ void XessSrModule::initDescriptorTables() {
                                             .descriptorCount = 1,
                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
                                         })
+                                        .defineDescriptorLayoutSetBinding({
+                                            .binding = 4,
+                                            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                            .descriptorCount = 1,
+                                            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                        })
+                                        .defineDescriptorLayoutSetBinding({
+                                            .binding = 5,
+                                            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                            .descriptorCount = 1,
+                                            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                        })
+                                        .defineDescriptorLayoutSetBinding({
+                                            .binding = 6,
+                                            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                            .descriptorCount = 1,
+                                            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                        })
                                         .endDescriptorLayoutSetBinding()
                                         .endDescriptorLayoutSet()
                                         .definePushConstant({
@@ -251,6 +274,9 @@ void XessSrModule::initImages() {
         xessMotionVectorImages_[i] = vk::DeviceLocalImage::create(
             fw->device(), fw->vma(), false, renderWidth_, renderHeight_, 1, VK_FORMAT_R16G16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+
+        depthDescriptorTables_[i]->bindImage(xessMotionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 3);
+        depthDescriptorTables_[i]->bindImage(outputImages_[i][2], VK_IMAGE_LAYOUT_GENERAL, 0, 4);
     }
 }
 
@@ -258,11 +284,29 @@ void XessSrModule::initPipeline() {
     auto fw = framework_.lock();
     auto shader = vk::Shader::create(
         fw->device(), (Renderer::folderPath / "shaders/world/upscaler/linear_to_device_depth_comp.spv").string());
+    auto firstHitDepthShader = vk::Shader::create(
+        fw->device(), (Renderer::folderPath / "shaders/world/upscaler/upscale_first_hit_depth_comp.spv").string());
+    auto motionShader = vk::Shader::create(
+        fw->device(), (Renderer::folderPath / "shaders/world/upscaler/upscale_motion_vector_comp.spv").string());
+    auto normalRoughnessShader = vk::Shader::create(
+        fw->device(), (Renderer::folderPath / "shaders/world/upscaler/upscale_normal_roughness_comp.spv").string());
 
     depthConversionPipeline_ = vk::ComputePipelineBuilder{}
                                    .defineShader(shader)
                                    .definePipelineLayout(depthDescriptorTables_[0])
                                    .build(fw->device());
+    firstHitDepthUpscalePipeline_ = vk::ComputePipelineBuilder{}
+                                        .defineShader(firstHitDepthShader)
+                                        .definePipelineLayout(depthDescriptorTables_[0])
+                                        .build(fw->device());
+    motionUpscalePipeline_ = vk::ComputePipelineBuilder{}
+                                 .defineShader(motionShader)
+                                 .definePipelineLayout(depthDescriptorTables_[0])
+                                 .build(fw->device());
+    normalRoughnessUpscalePipeline_ = vk::ComputePipelineBuilder{}
+                                          .defineShader(normalRoughnessShader)
+                                          .definePipelineLayout(depthDescriptorTables_[0])
+                                          .build(fw->device());
 }
 
 void XessSrModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
@@ -378,6 +422,150 @@ void XessSrModuleContext::render() {
     auto worldCommandBuffer = fwContext->worldCommandBuffer;
     auto mainQueueIndex = fwContext->framework.lock()->physicalDevice()->mainQueueIndex();
 
+    auto dispatchUpscaledFirstHitDepth = [&]() {
+        worldCommandBuffer->barriersBufferImage(
+            {},
+            {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+              .oldLayout = inputFirstHitDepthImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = inputFirstHitDepthImage,
+              .subresourceRange = vk::wholeColorSubresourceRange},
+             {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .oldLayout = upscaledFirstHitDepthImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = upscaledFirstHitDepthImage,
+              .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        inputFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        depthDescriptorTable->bindImage(inputFirstHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 0);
+        depthDescriptorTable->bindImage(upscaledFirstHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+
+        MotionUpscalePushConstants pushConstants{
+            static_cast<float>(module->displayWidth_) / static_cast<float>(std::max(1u, module->renderWidth_)),
+            static_cast<float>(module->displayHeight_) / static_cast<float>(std::max(1u, module->renderHeight_)),
+            module->renderWidth_,
+            module->renderHeight_,
+            module->displayWidth_,
+            module->displayHeight_,
+        };
+
+        worldCommandBuffer->bindDescriptorTable(depthDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->firstHitDepthUpscalePipeline_);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), depthDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->displayWidth_ + 15) / 16,
+                      (module->displayHeight_ + 15) / 16, 1);
+    };
+
+    auto dispatchUpscaledMotion = [&]() {
+        worldCommandBuffer->barriersBufferImage(
+            {},
+            {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+              .oldLayout = inputMotionVectorImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = inputMotionVectorImage,
+              .subresourceRange = vk::wholeColorSubresourceRange},
+             {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .oldLayout = upscaledMotionVectorImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = upscaledMotionVectorImage,
+              .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        inputMotionVectorImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        upscaledMotionVectorImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        depthDescriptorTable->bindImage(inputMotionVectorImage, VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        depthDescriptorTable->bindImage(upscaledMotionVectorImage, VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+
+        MotionUpscalePushConstants pushConstants{
+            static_cast<float>(module->displayWidth_) / static_cast<float>(std::max(1u, module->renderWidth_)),
+            static_cast<float>(module->displayHeight_) / static_cast<float>(std::max(1u, module->renderHeight_)),
+            module->renderWidth_,
+            module->renderHeight_,
+            module->displayWidth_,
+            module->displayHeight_,
+        };
+
+        worldCommandBuffer->bindDescriptorTable(depthDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->motionUpscalePipeline_);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), depthDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->displayWidth_ + 15) / 16,
+                      (module->displayHeight_ + 15) / 16, 1);
+    };
+
+    auto dispatchUpscaledNormalRoughness = [&]() {
+        worldCommandBuffer->barriersBufferImage(
+            {},
+            {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+              .oldLayout = inputNormalRoughnessImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = inputNormalRoughnessImage,
+              .subresourceRange = vk::wholeColorSubresourceRange},
+             {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .oldLayout = upscaledNormalRoughnessImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = upscaledNormalRoughnessImage,
+              .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        inputNormalRoughnessImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        upscaledNormalRoughnessImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        depthDescriptorTable->bindImage(inputNormalRoughnessImage, VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        depthDescriptorTable->bindImage(upscaledNormalRoughnessImage, VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+
+        MotionUpscalePushConstants pushConstants{
+            static_cast<float>(module->displayWidth_) / static_cast<float>(std::max(1u, module->renderWidth_)),
+            static_cast<float>(module->displayHeight_) / static_cast<float>(std::max(1u, module->renderHeight_)),
+            module->renderWidth_,
+            module->renderHeight_,
+            module->displayWidth_,
+            module->displayHeight_,
+        };
+
+        worldCommandBuffer->bindDescriptorTable(depthDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->normalRoughnessUpscalePipeline_);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), depthDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->displayWidth_ + 15) / 16,
+                      (module->displayHeight_ + 15) / 16, 1);
+    };
+
     auto fallbackBlit = [&]() {
         worldCommandBuffer->barriersBufferImage(
             {},
@@ -400,32 +588,10 @@ void XessSrModuleContext::render() {
               .srcQueueFamilyIndex = mainQueueIndex,
               .dstQueueFamilyIndex = mainQueueIndex,
               .image = outputImage,
-              .subresourceRange = vk::wholeColorSubresourceRange},
-             {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-              .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-              .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-              .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-              .oldLayout = inputFirstHitDepthImage->imageLayout(),
-              .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-              .srcQueueFamilyIndex = mainQueueIndex,
-              .dstQueueFamilyIndex = mainQueueIndex,
-              .image = inputFirstHitDepthImage,
-              .subresourceRange = vk::wholeColorSubresourceRange},
-             {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-              .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-              .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-              .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-              .oldLayout = upscaledFirstHitDepthImage->imageLayout(),
-              .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-              .srcQueueFamilyIndex = mainQueueIndex,
-              .dstQueueFamilyIndex = mainQueueIndex,
-              .image = upscaledFirstHitDepthImage,
               .subresourceRange = vk::wholeColorSubresourceRange}});
 
         inputColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         outputImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        inputFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
         VkImageBlit colorBlit{};
         colorBlit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -438,18 +604,6 @@ void XessSrModuleContext::render() {
         vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), inputColorImage->vkImage(),
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, outputImage->vkImage(),
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorBlit, VK_FILTER_LINEAR);
-
-        VkImageBlit depthBlit{};
-        depthBlit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        depthBlit.srcOffsets[1] = {static_cast<int32_t>(inputFirstHitDepthImage->width()),
-                                   static_cast<int32_t>(inputFirstHitDepthImage->height()), 1};
-        depthBlit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        depthBlit.dstOffsets[1] = {static_cast<int32_t>(upscaledFirstHitDepthImage->width()),
-                                   static_cast<int32_t>(upscaledFirstHitDepthImage->height()), 1};
-
-        vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), inputFirstHitDepthImage->vkImage(),
-                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, upscaledFirstHitDepthImage->vkImage(),
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depthBlit, VK_FILTER_LINEAR);
 
         worldCommandBuffer->barriersBufferImage(
             {}, {{.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -464,6 +618,9 @@ void XessSrModuleContext::render() {
                   .subresourceRange = vk::wholeColorSubresourceRange}});
 
         outputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        dispatchUpscaledFirstHitDepth();
+        dispatchUpscaledMotion();
+        dispatchUpscaledNormalRoughness();
     };
 
     if (!module->xessEnabled_ || !module->initialized_ || !module->xess_) {
@@ -655,40 +812,7 @@ void XessSrModuleContext::render() {
     }
 
     outputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
-
-    worldCommandBuffer->barriersBufferImage({}, {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                                                  .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                                  .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                                                  .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-                                                  .oldLayout = inputFirstHitDepthImage->imageLayout(),
-                                                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                                  .srcQueueFamilyIndex = mainQueueIndex,
-                                                  .dstQueueFamilyIndex = mainQueueIndex,
-                                                  .image = inputFirstHitDepthImage,
-                                                  .subresourceRange = vk::wholeColorSubresourceRange},
-                                                 {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                                                  .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                                  .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                                                  .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                                                  .oldLayout = upscaledFirstHitDepthImage->imageLayout(),
-                                                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                                  .srcQueueFamilyIndex = mainQueueIndex,
-                                                  .dstQueueFamilyIndex = mainQueueIndex,
-                                                  .image = upscaledFirstHitDepthImage,
-                                                  .subresourceRange = vk::wholeColorSubresourceRange}});
-
-    inputFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-
-    VkImageBlit depthBlit{};
-    depthBlit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    depthBlit.srcOffsets[1] = {static_cast<int32_t>(module->renderWidth_), static_cast<int32_t>(module->renderHeight_),
-                               1};
-    depthBlit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    depthBlit.dstOffsets[1] = {static_cast<int32_t>(module->displayWidth_),
-                               static_cast<int32_t>(module->displayHeight_), 1};
-
-    vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), inputFirstHitDepthImage->vkImage(),
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, upscaledFirstHitDepthImage->vkImage(),
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depthBlit, VK_FILTER_LINEAR);
+    dispatchUpscaledFirstHitDepth();
+    dispatchUpscaledMotion();
+    dispatchUpscaledNormalRoughness();
 }

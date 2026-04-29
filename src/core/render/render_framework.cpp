@@ -12,6 +12,7 @@
 
 #include <iostream>
 #include <random>
+#include <thread>
 
 std::ostream &renderFrameworkCout() {
     return std::cout << "[Render Framework] ";
@@ -155,7 +156,7 @@ void Framework::init(GLFWwindow *window) {
     swapchain_ = vk::Swapchain::create(physicalDevice_, device_, window_);
     mainCommandPool_ = vk::CommandPool::create(physicalDevice_, device_);
     asyncCommandPool_ = vk::CommandPool::create(physicalDevice_, device_, physicalDevice_->secondaryQueueIndex());
-    gc_ = GarbageCollector::create(shared_from_this());
+    frameResourceRetainer_ = FrameResourceRetainer::create(shared_from_this());
 
     uint32_t imageCount = swapchain_->imageCount();
 
@@ -216,7 +217,7 @@ void Framework::acquireContext() {
     currentContext_ = contexts_[imageIndex];
     indexHistory_.push(imageIndex);
     if (indexHistory_.size() > swapchain_->imageCount()) indexHistory_.pop();
-    gc_->clear(imageIndex);
+    frameResourceRetainer_->beginFrame(imageIndex);
 
     if (currentContext_->imageAcquiredSemaphore != VK_NULL_HANDLE) {
         recycleSemaphore(currentContext_->imageAcquiredSemaphore);
@@ -318,7 +319,7 @@ void Framework::present() {
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || vk::Window::framebufferResized ||
-        Renderer::options.needRecreate || pipeline_->needRecreate) {
+        Renderer::options.needRecreate || pipeline_->isRecreationNeeded) {
         recreate();
         return;
     } else if (result != VK_SUCCESS) {
@@ -326,60 +327,113 @@ void Framework::present() {
         waitDeviceIdle();
         exit(EXIT_FAILURE);
     }
+
+    limitFrameRate();
+}
+
+uint32_t Framework::effectiveFrameRateLimit() const {
+    const uint32_t maxFps = Renderer::options.maxFps;
+
+    if (maxFps == 0 || maxFps >= 260) {
+        return 0;
+    }
+
+    return maxFps;
+}
+
+void Framework::limitFrameRate() {
+    const uint32_t fpsLimit = effectiveFrameRateLimit();
+    if (fpsLimit == 0) {
+        frameLimitAnchor_ = {};
+        frameLimitFps_ = 0;
+        return;
+    }
+
+    const auto frameDuration =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / fpsLimit));
+    if (frameDuration <= std::chrono::steady_clock::duration::zero()) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (frameLimitFps_ != fpsLimit || frameLimitAnchor_ == std::chrono::steady_clock::time_point{}) {
+        frameLimitAnchor_ = now;
+        frameLimitFps_ = fpsLimit;
+    }
+
+    const auto target = frameLimitAnchor_ + frameDuration;
+    if (now < target) {
+        std::this_thread::sleep_until(target);
+        frameLimitAnchor_ = std::chrono::steady_clock::now();
+    } else {
+        frameLimitAnchor_ = now;
+    }
 }
 
 void Framework::recreate() {
     if (!running_) return;
 
     std::unique_lock<std::recursive_mutex> lck(Renderer::instance().framework()->recreateMtx());
+    const bool reportNativeProgress = Pipeline::nativeRebuildActive();
 
-    Renderer::options.needRecreate = false;
-    vk::Window::framebufferResized = false;
-    pipeline_->needRecreate = false;
+    try {
+        Renderer::options.needRecreate = false;
+        vk::Window::framebufferResized = false;
+        pipeline_->isRecreationNeeded = false;
 
-    waitRenderQueueIdle();
+        waitRenderQueueIdle();
 
-    int width = 0, height = 0;
-    GLFW_GetFramebufferSize(window_->window(), &width, &height);
-    while (width == 0 || height == 0) {
+        int width = 0, height = 0;
         GLFW_GetFramebufferSize(window_->window(), &width, &height);
-        GLFW_WaitEvents();
+        while (width == 0 || height == 0) {
+            GLFW_GetFramebufferSize(window_->window(), &width, &height);
+            GLFW_WaitEvents();
+        }
+
+        currentContextIndex_ = 0;
+        currentContext_ = nullptr;
+        contexts_.clear();
+
+        uploadCommandBuffers_.clear();
+        overlayCommandBuffers_.clear();
+        worldCommandBuffers_.clear();
+        fuseCommandBuffers_.clear();
+        commandFinishedFences_.clear();
+        commandProcessedSemaphores_.clear();
+
+        swapchain_->reconstruct();
+
+        uint32_t size = swapchain_->imageCount();
+
+        // create command buffer for each context
+        for (int i = 0; i < size; i++) {
+            uploadCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
+            overlayCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
+            worldCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
+            fuseCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
+        }
+
+        // create fence for each context
+        for (int i = 0; i < size; i++) { commandFinishedFences_.push_back(vk::Fence::create(device_, true)); }
+
+        // create semaphore for each context for command procssed
+        for (int i = 0; i < size; i++) { commandProcessedSemaphores_.push_back(vk::Semaphore::create(device_)); }
+
+        for (int i = 0; i < size; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
+
+        pipeline_->recreate(shared_from_this());
+
+        Renderer::instance().textures()->bindAllTextures();
+
+        if (reportNativeProgress) {
+            Pipeline::endNativeRebuild();
+        }
+    } catch (...) {
+        if (reportNativeProgress) {
+            Pipeline::endNativeRebuild();
+        }
+        throw;
     }
-
-    currentContextIndex_ = 0;
-    currentContext_ = nullptr;
-    contexts_.clear();
-
-    uploadCommandBuffers_.clear();
-    overlayCommandBuffers_.clear();
-    worldCommandBuffers_.clear();
-    fuseCommandBuffers_.clear();
-    commandFinishedFences_.clear();
-    commandProcessedSemaphores_.clear();
-
-    swapchain_->reconstruct();
-
-    uint32_t size = swapchain_->imageCount();
-
-    // create command buffer for each context
-    for (int i = 0; i < size; i++) {
-        uploadCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
-        overlayCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
-        worldCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
-        fuseCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
-    }
-
-    // create fence for each context
-    for (int i = 0; i < size; i++) { commandFinishedFences_.push_back(vk::Fence::create(device_, true)); }
-
-    // create semaphore for each context for command procssed
-    for (int i = 0; i < size; i++) { commandProcessedSemaphores_.push_back(vk::Semaphore::create(device_)); }
-
-    for (int i = 0; i < size; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
-
-    pipeline_->recreate(shared_from_this());
-
-    Renderer::instance().textures()->bindAllTextures();
 }
 
 void Framework::waitDeviceIdle() {
@@ -575,8 +629,8 @@ std::shared_ptr<Pipeline> Framework::pipeline() {
     return pipeline_;
 }
 
-GarbageCollector &Framework::gc() {
-    return *gc_;
+FrameResourceRetainer &Framework::frameResourceRetainer() {
+    return *frameResourceRetainer_;
 }
 
 std::shared_ptr<vk::Semaphore> Framework::acquireSemaphore() {
@@ -594,20 +648,13 @@ void Framework::recycleSemaphore(std::shared_ptr<vk::Semaphore> semaphore) {
     recycledImageAcquiredSemaphores_.push(semaphore);
 }
 
-GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {
-    collectors_.resize(framework->swapchain_->imageCount());
+FrameResourceRetainer::FrameResourceRetainer(std::shared_ptr<Framework> framework) {
+    retainedResourcesByFrame_.resize(framework->swapchain_->imageCount());
 }
 
-void GarbageCollector::clear(uint32_t index) {
+void FrameResourceRetainer::beginFrame(uint32_t frameIndex) {
     std::unique_lock<std::recursive_mutex> lck(mtx_);
 
-    index_ = index;
-
-    auto framework = framework_.lock();
-
-#ifdef DEBUG
-    // std::cout << "GarbageCollector cleared for index: " << index << std::endl;
-#endif
-
-    collectors_[index_].clear();
+    currentFrameIndex_ = frameIndex;
+    retainedResourcesByFrame_[currentFrameIndex_].clear();
 }

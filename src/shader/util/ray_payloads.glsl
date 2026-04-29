@@ -22,13 +22,6 @@ struct MainRay {
     T_VEC3 normal;
     T_UINT stateBits;
 
-    T_UINT materialPacked0;
-    T_UINT materialPacked1;
-    T_UINT materialPacked2;
-    T_UINT materialPacked3;
-    T_UINT materialPacked4;
-    T_UINT materialPacked5;
-
     T_VEC3 directLightRadiance;
     T_UINT pad0;
 };
@@ -45,10 +38,9 @@ struct MaterialInfo {
 
 struct ShadowRay {
     T_VEC3 radiance;
-    T_VEC3 throughput;
     T_UINT insideBoat;
+    T_VEC3 throughput;
     T_UINT pad0;
-    T_UINT pad1;
 };
 
 #endif

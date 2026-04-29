@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <queue>
+#include <unordered_map>
 
 class Framework;
 class FrameworkContext;
@@ -51,25 +52,28 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::TLASBuilder> tlasBuilder;
 
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
-    std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> positionBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> materialBufferAddr;
-    std::shared_ptr<vk::DeviceLocalBuffer> lastVertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastIndexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastPositionBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastObjToWorldMat;
+    std::vector<std::string> hitGroupNames;
 
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
 
     void uploadBuffer(std::vector<uint32_t> &blasOffsets,
-                      std::vector<uint64_t> &vertexBufferAddrs,
                       std::vector<uint64_t> &indexBufferAddrs,
                       std::vector<uint64_t> &positionBufferAddrs,
                       std::vector<uint64_t> &materialBufferAddrs,
-                      std::vector<uint64_t> &lastVertexBufferAddrs,
                       std::vector<uint64_t> &lastIndexBufferAddrs,
                       std::vector<uint64_t> &lastPositionBufferAddrs,
                       std::vector<glm::mat4> &lastObjToWorldMats);
+    void setupHitGroupSbt(const std::unordered_map<std::string, uint32_t> &hitGroupNameToIndex,
+                          uint32_t fallbackHitGroupIndex,
+                          uint32_t shadowHitGroupIndex,
+                          std::shared_ptr<vk::CommandBuffer> commandBuffer,
+                          std::shared_ptr<vk::SBT> updateSbt,
+                          std::shared_ptr<vk::SBT> querySbt);
     void render();
 };

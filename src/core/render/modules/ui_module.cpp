@@ -6,6 +6,10 @@
 #include "core/render/renderer.hpp"
 #include "core/render/world.hpp"
 
+#include <fstream>
+#include <regex>
+#include <stdexcept>
+
 UIModule::UIModule() {}
 
 UIModule::~UIModule() {
@@ -18,12 +22,9 @@ void UIModule::init(std::shared_ptr<Framework> framework) {
     framework_ = framework;
 
     initOverlayDescriptorTablesAndFrameSamplers();
-
     initOverlayDrawImages();
     initOverlayDrawRenderPass();
     initOverlayDrawFrameBuffers();
-    initOverlayDrawPipelineTypes();
-    initOverlayDrawPipelines();
 
     initOverlayPostImages();
     initOverlayPostRenderPass();
@@ -50,16 +51,243 @@ std::vector<std::shared_ptr<vk::DescriptorTable>> &UIModule::overlayDescriptorTa
     return overlayDescriptorTables_;
 }
 
+const std::vector<OverlayDynamicDrawShaderInfo> &UIModule::overlayDynamicDrawShaders() const {
+    return overlayDynamicDrawShaders_;
+}
+
+uint32_t UIModule::registerOverlayDrawShader(const std::string &key,
+                                             uint32_t vertexFormatType,
+                                             uint32_t drawMode,
+                                             uint32_t uniformSize,
+                                             const std::string &vertexShaderPath,
+                                             const std::string &fragmentShaderPath,
+                                             const std::unordered_map<std::string, std::string> &definitions) {
+    enum class OverlayAttributeNumericKind {
+        FLOAT,
+        SINT,
+        UINT,
+    };
+
+    struct OverlayAttributeType {
+        OverlayAttributeNumericKind numericKind;
+    };
+
+    auto overlayTopologyForDrawMode = [](uint32_t overlayDrawMode) -> VkPrimitiveTopology {
+        switch (overlayDrawMode) {
+            case 1: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+            case 2: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+            case 3: return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+            case 4: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            case 5: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+            case 6: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+            case 7: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            default: throw std::runtime_error("Unsupported overlay draw mode");
+        }
+    };
+    auto overlayVertexLayoutFor = [](uint32_t overlayVertexFormatType) -> vk::VertexLayoutInfo {
+        switch (overlayVertexFormatType) {
+            case 0: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorTexLightNormal>();
+            case 1: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorTexOverlayLightNormal>();
+            case 2: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexColorLight>();
+            case 3: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionOnly>();
+            case 4: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColor>();
+            case 5: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorNormal>();
+            case 6: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorLight>();
+            case 7: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTex>();
+            case 8: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexColor>();
+            case 9: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorTexLight>();
+            case 10: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexLightColor>();
+            case 11: return vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexColorNormal>();
+            default: throw std::runtime_error("Unsupported overlay vertex format type");
+        }
+    };
+    auto parseOverlayVertexInputs =
+        [](const std::string &overlayVertexShaderPath) -> std::unordered_map<uint32_t, OverlayAttributeType> {
+        std::ifstream sourceFile(overlayVertexShaderPath, std::ios::binary);
+        if (!sourceFile.is_open()) { return {}; }
+
+        std::string sourceText{std::istreambuf_iterator<char>(sourceFile), std::istreambuf_iterator<char>()};
+        std::regex inputPattern(
+            R"(layout\s*\(\s*location\s*=\s*(\d+)\s*\)\s*in\s+(float|int|uint|vec[234]|ivec[234]|uvec[234])\s+\w+\s*;)");
+        std::unordered_map<uint32_t, OverlayAttributeType> result;
+
+        for (std::sregex_iterator it(sourceText.begin(), sourceText.end(), inputPattern), end; it != end; ++it) {
+            uint32_t location = static_cast<uint32_t>(std::stoul((*it)[1].str()));
+            std::string type = (*it)[2].str();
+
+            OverlayAttributeNumericKind numericKind = OverlayAttributeNumericKind::FLOAT;
+            if (!type.empty() && type[0] == 'i') {
+                numericKind = OverlayAttributeNumericKind::SINT;
+            } else if (!type.empty() && type[0] == 'u') {
+                numericKind = OverlayAttributeNumericKind::UINT;
+            }
+
+            result[location] = OverlayAttributeType{numericKind};
+        }
+
+        return result;
+    };
+    auto adaptOverlayAttributeFormat =
+        [](VkFormat format, OverlayAttributeNumericKind numericKind) -> VkFormat {
+        if (numericKind == OverlayAttributeNumericKind::FLOAT) {
+            switch (format) {
+                case VK_FORMAT_R16G16_SINT: return VK_FORMAT_R16G16_SSCALED;
+                case VK_FORMAT_R16G16_UINT: return VK_FORMAT_R16G16_USCALED;
+                case VK_FORMAT_R16_SINT: return VK_FORMAT_R16_SSCALED;
+                case VK_FORMAT_R16_UINT: return VK_FORMAT_R16_USCALED;
+                case VK_FORMAT_R8G8B8A8_SINT: return VK_FORMAT_R8G8B8A8_SSCALED;
+                case VK_FORMAT_R8G8B8A8_UINT: return VK_FORMAT_R8G8B8A8_USCALED;
+                default: return format;
+            }
+        }
+        return format;
+    };
+    auto makeOverlayVertexLayout = [&](uint32_t overlayVertexFormatType,
+                                       const std::string &overlayVertexShaderPath) -> vk::VertexLayoutInfo {
+        vk::VertexLayoutInfo layout = overlayVertexLayoutFor(overlayVertexFormatType);
+        std::unordered_map<uint32_t, OverlayAttributeType> inputs = parseOverlayVertexInputs(overlayVertexShaderPath);
+
+        for (VkVertexInputAttributeDescription &attribute : layout.attributeDescriptions) {
+            auto it = inputs.find(attribute.location);
+            if (it == inputs.end()) { continue; }
+            attribute.format = adaptOverlayAttributeFormat(attribute.format, it->second.numericKind);
+        }
+
+        return layout;
+    };
+
+    auto existing = overlayDynamicDrawShaderIds_.find(key);
+    if (existing != overlayDynamicDrawShaderIds_.end()) { return existing->second; }
+
+    auto framework = framework_.lock();
+    if (framework == nullptr) { throw std::runtime_error("Framework is not available"); }
+    bool descriptorRangeChanged = Renderer::instance().buffers()->registerOverlayDrawUniformSize(uniformSize);
+    if (descriptorRangeChanged) {
+        for (uint32_t frameIndex = 0; frameIndex < overlayDescriptorTables_.size(); ++frameIndex) {
+            refreshOverlayDescriptorTable(frameIndex);
+        }
+    }
+
+    OverlayDynamicDrawShaderInfo info{};
+    info.key = key;
+    info.vertexFormatType = vertexFormatType;
+    info.drawMode = drawMode;
+    info.uniformSize = uniformSize;
+    info.vertexShaderPath = vertexShaderPath;
+    info.fragmentShaderPath = fragmentShaderPath;
+    info.definitions = definitions;
+    info.topology = overlayTopologyForDrawMode(drawMode);
+    info.shaders.vertexShader = vk::Shader::create(
+        framework->device(), vertexShaderPath, VK_SHADER_STAGE_VERTEX_BIT, definitions);
+    info.shaders.fragmentShader = vk::Shader::create(
+        framework->device(), fragmentShaderPath, VK_SHADER_STAGE_FRAGMENT_BIT, definitions);
+
+    vk::DynamicGraphicsPipelineBuilder builder{1};
+    vk::VertexLayoutInfo vertexLayout = makeOverlayVertexLayout(vertexFormatType, vertexShaderPath);
+    builder.defineRenderPass(overlayDrawRenderPass_, 0)
+        .beginShaderStage()
+        .defineShaderStage(info.shaders.vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
+        .defineShaderStage(info.shaders.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
+        .endShaderStage();
+    builder.defineVertexInputState(vertexLayout);
+    info.pipeline =
+        builder.defineInputAssemblyState(info.topology).definePipelineLayout(overlayDescriptorTables_[0]).build(
+            framework->device());
+
+    uint32_t shaderId = overlayDynamicDrawShaders_.size();
+    overlayDynamicDrawShaderIds_[key] = shaderId;
+    overlayDynamicDrawShaders_.push_back(std::move(info));
+    return shaderId;
+}
+
+const OverlayDynamicDrawShaderInfo &UIModule::overlayDrawShaderInfo(uint32_t shaderId) const {
+    return overlayDynamicDrawShaders_.at(shaderId);
+}
+
+std::shared_ptr<vk::DescriptorTable> UIModule::createOverlayDescriptorTable() {
+    auto framework = framework_.lock();
+
+    return vk::DescriptorTableBuilder{}
+        .beginDescriptorLayoutSet()
+        .beginDescriptorLayoutSetBinding()
+        .defineDescriptorLayoutSetBinding({
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 4096,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        })
+        .defineDescriptorLayoutSetBinding({
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        })
+        .endDescriptorLayoutSetBinding()
+        .endDescriptorLayoutSet()
+        .beginDescriptorLayoutSet()
+        .beginDescriptorLayoutSetBinding()
+        .defineDescriptorLayoutSetBinding({
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        })
+        .defineDescriptorLayoutSetBinding({
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        })
+        .endDescriptorLayoutSetBinding()
+        .endDescriptorLayoutSet()
+        .build(framework->device());
+}
+
+void UIModule::bindOverlayDescriptorTableResources(std::shared_ptr<vk::DescriptorTable> descriptorTable,
+                                                   uint32_t frameIndex) {
+    for (auto &[index, binding] : overlayTextureBindings_) {
+        descriptorTable->bindSamplerImage(binding.sampler, binding.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0,
+                                          0, index);
+    }
+
+    descriptorTable->bindSamplerImage(overlayDrawColorImageSamplers_[frameIndex], overlayDrawColorImages_[frameIndex],
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 0);
+    descriptorTable->bindBufferRange(Renderer::instance().buffers()->overlayDrawUniformBuffer(), 1, 0, 0,
+                                     Renderer::instance().buffers()->overlayDrawUniformDescriptorRange());
+    descriptorTable->bindBufferRange(Renderer::instance().buffers()->overlayPostUniformBuffer(), 1, 1, 0,
+                                     Renderer::instance().buffers()->overlayPostUniformDescriptorRange());
+}
+
 void UIModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                            std::shared_ptr<vk::DeviceLocalImage> image,
                            int index) {
     auto framework = framework_.lock();
+    overlayTextureBindings_[index] = {
+        .sampler = sampler,
+        .image = image,
+    };
 
     uint32_t size = framework->swapchain()->imageCount();
     for (int i = 0; i < size; i++) {
         overlayDescriptorTables_[i]->bindSamplerImage(sampler, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0,
                                                       index);
     }
+}
+
+void UIModule::refreshOverlayDescriptorTable(uint32_t frameIndex) {
+    auto framework = framework_.lock();
+    auto &frr = framework->frameResourceRetainer();
+
+    auto oldDescriptorTable = overlayDescriptorTables_[frameIndex];
+    auto descriptorTable = createOverlayDescriptorTable();
+    bindOverlayDescriptorTableResources(descriptorTable, frameIndex);
+
+    overlayDescriptorTables_[frameIndex] = descriptorTable;
+    if (frameIndex < contexts_.size() && contexts_[frameIndex] != nullptr) {
+        contexts_[frameIndex]->overlayDescriptorTable = descriptorTable;
+    }
+
+    frr.retain(oldDescriptorTable);
 }
 
 void UIModule::initOverlayDescriptorTablesAndFrameSamplers() {
@@ -70,45 +298,7 @@ void UIModule::initOverlayDescriptorTablesAndFrameSamplers() {
     overlayDrawColorImageSamplers_.resize(size);
 
     for (int i = 0; i < size; i++) {
-        overlayDescriptorTables_[i] = vk::DescriptorTableBuilder{}
-                                          .beginDescriptorLayoutSet() // set 0
-                                          .beginDescriptorLayoutSetBinding()
-                                          .defineDescriptorLayoutSetBinding({
-                                              .binding = 0,
-                                              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                              .descriptorCount = 4096, // a very big number
-                                              .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                          })
-                                          .defineDescriptorLayoutSetBinding({
-                                              .binding = 1,
-                                              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                              .descriptorCount = 1,
-                                              .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                          })
-                                          .endDescriptorLayoutSetBinding()
-                                          .endDescriptorLayoutSet()
-                                          .beginDescriptorLayoutSet() // set 1
-                                          .beginDescriptorLayoutSetBinding()
-                                          .defineDescriptorLayoutSetBinding({
-                                              .binding = 0,
-                                              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                              .descriptorCount = 1,
-                                              .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                          })
-                                          .defineDescriptorLayoutSetBinding({
-                                              .binding = 1,
-                                              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                              .descriptorCount = 1,
-                                              .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                          })
-                                          .endDescriptorLayoutSetBinding()
-                                          .endDescriptorLayoutSet()
-                                          .definePushConstant(VkPushConstantRange{
-                                              .stageFlags = VK_SHADER_STAGE_ALL,
-                                              .offset = 0,
-                                              .size = sizeof(int),
-                                          })
-                                          .build(framework->device());
+        overlayDescriptorTables_[i] = createOverlayDescriptorTable();
 
         overlayDrawColorImageSamplers_[i] = vk::Sampler::create(
             framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
@@ -207,147 +397,6 @@ void UIModule::initOverlayDrawFrameBuffers() {
                                           .defineAttachment(overlayDrawDepthStencilImages_[i])
                                           .endAttachment()
                                           .build(framework->device(), overlayDrawRenderPass_);
-    }
-}
-
-void UIModule::initOverlayDrawPipelineTypes() {
-    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
-    overlayDrawPipelineInfos_[POSITION_TEX] = {
-        .vertexShaderFile = (shaderPath / "overlay/core/position_tex_glint_vert.spv").string(),
-        .fragmentShaderFile = (shaderPath / "overlay/core/position_tex_glint_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION_COLOR] = {
-        .vertexShaderFile = (shaderPath / "overlay/core/position_color_vert.spv").string(),
-        .fragmentShaderFile = (shaderPath / "overlay/core/position_color_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION_TEX_COLOR] = {
-        .vertexShaderFile = (shaderPath / "overlay/core/position_tex_color_vert.spv").string(),
-        .fragmentShaderFile = (shaderPath / "overlay/core/position_tex_color_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION_COLOR_TEX_LIGHT] = {
-        .vertexShaderFile = (shaderPath / "overlay/core/position_color_tex_light_vert.spv").string(),
-        .fragmentShaderFile = (shaderPath / "overlay/core/position_color_tex_light_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL] = {
-        .vertexShaderFile =
-            (shaderPath / "overlay/core/position_color_tex_overlay_light_normal_entity_cull_vert.spv").string(),
-        .fragmentShaderFile =
-            (shaderPath / "overlay/core/position_color_tex_overlay_light_normal_entity_cull_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL_NO_OUTLINE] = {
-        .vertexShaderFile =
-            (shaderPath / "overlay/core/position_color_tex_overlay_light_normal_entity_no_outline_vert.spv").string(),
-        .fragmentShaderFile =
-            (shaderPath / "overlay/core/position_color_tex_overlay_light_normal_entity_no_outline_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION_END_PORTAL] = {
-        .vertexShaderFile = (shaderPath / "overlay/core/position_end_portal_vert.spv").string(),
-        .fragmentShaderFile = (shaderPath / "overlay/core/position_end_portal_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-
-    overlayDrawPipelineInfos_[POSITION] = {
-        .vertexShaderFile = (shaderPath / "overlay/core/position_vert.spv").string(),
-        .fragmentShaderFile = (shaderPath / "overlay/core/position_frag.spv").string(),
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-}
-
-void UIModule::initOverlayDrawPipelines() {
-    auto framework = framework_.lock();
-
-    for (auto overlayPipelineInfo : overlayDrawPipelineInfos_) {
-        auto [type, info] = overlayPipelineInfo;
-        auto [vertexShaderFile, fragmentShaderFile, topology] = info;
-
-        overlayDrawPipelineShaders_[type] = {
-            .vertexShader = vk::Shader::create(framework->device(), vertexShaderFile),
-            .fragmentShader = vk::Shader::create(framework->device(), fragmentShaderFile),
-        };
-
-#ifdef DEBUG
-        {
-            std::stringstream ss;
-            ss << "UI Draw Vertex Shader Type " << type;
-            std::string vertName = ss.str();
-
-            VkDebugUtilsObjectNameInfoEXT nameInfo = {};
-            nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
-            nameInfo.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
-            nameInfo.objectHandle = (uint64_t)overlayDrawPipelineShaders_[type].vertexShader->vkShaderModule();
-            nameInfo.pObjectName = vertName.c_str();
-
-            vkSetDebugUtilsObjectNameEXT(framework->device()->vkDevice(), &nameInfo);
-        }
-
-        {
-            std::stringstream ss;
-            ss << "UI Draw Fragment Shader Type " << type;
-            std::string fragName = ss.str();
-
-            VkDebugUtilsObjectNameInfoEXT nameInfo = {};
-            nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
-            nameInfo.objectType = VK_OBJECT_TYPE_SHADER_MODULE;
-            nameInfo.objectHandle = (uint64_t)overlayDrawPipelineShaders_[type].fragmentShader->vkShaderModule();
-            nameInfo.pObjectName = fragName.c_str();
-
-            vkSetDebugUtilsObjectNameEXT(framework->device()->vkDevice(), &nameInfo);
-        }
-#endif
-
-        vk::DynamicGraphicsPipelineBuilder builder{1};
-        builder.defineRenderPass(overlayDrawRenderPass_, 0)
-            .beginShaderStage()
-            .defineShaderStage(overlayDrawPipelineShaders_[type].vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
-            .defineShaderStage(overlayDrawPipelineShaders_[type].fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
-            .endShaderStage();
-
-        switch (type) {
-            case POSITION_TEX: {
-                builder.defineVertexInputState<vk::VertexFormat::PositionTex>();
-                break;
-            }
-            case POSITION_TEX_COLOR: {
-                builder.defineVertexInputState<vk::VertexFormat::PositionTexColor>();
-                break;
-            }
-            case POSITION_COLOR: {
-                builder.defineVertexInputState<vk::VertexFormat::PositionColor>();
-                break;
-            }
-            case POSITION_COLOR_TEX_LIGHT: {
-                builder.defineVertexInputState<vk::VertexFormat::PositionColorTexLight>();
-                break;
-            }
-            case POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL_NO_OUTLINE:
-            case POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL: {
-                builder.defineVertexInputState<vk::VertexFormat::PositionColorTexOverlayLightNormal>();
-                break;
-            }
-            case POSITION_END_PORTAL:
-            case POSITION: {
-                builder.defineVertexInputState<vk::VertexFormat::PositionOnly>();
-                break;
-            }
-
-            default: throw std::runtime_error("A vertex formet should be defined!");
-        }
-
-        overlayDrawPipelines_[type] = builder.defineInputAssemblyState(topology)
-                                          .definePipelineLayout(overlayDescriptorTables_[0])
-                                          .build(framework->device());
     }
 }
 
@@ -1261,7 +1310,8 @@ void UIModuleContext::clearOverlayEntireDepthStencilAttachment(int aspectMask) {
 
 void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer,
                                   std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer,
-                                  OverlayDrawPipelineType pipelineType,
+                                  uint32_t shaderId,
+                                  uint32_t uniformOffset,
                                   uint32_t indexCount,
                                   VkIndexType indexType) {
     auto context = frameworkContext.lock();
@@ -1272,13 +1322,14 @@ void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexB
 
     switchOverlayDraw();
 
+    auto &shaderInfo = module->overlayDrawShaderInfo(shaderId);
     vkCmdBindPipeline(context->overlayCommandBuffer->vkCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      module->overlayDrawPipelines_[pipelineType]->vkPipeline());
+                      shaderInfo.pipeline->vkPipeline());
 
-    auto pipelineLayout = overlayDescriptorTable->vkPipelineLayout();
-    int drawID = Renderer::instance().buffers()->getDrawID();
-    vkCmdPushConstants(context->overlayCommandBuffer->vkCommandBuffer(), pipelineLayout, VK_SHADER_STAGE_ALL, 0,
-                       sizeof(int), &drawID);
+    uint32_t dynamicOffsets[] = {uniformOffset, 0};
+    vkCmdBindDescriptorSets(context->overlayCommandBuffer->vkCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            overlayDescriptorTable->vkPipelineLayout(), 0, overlayDescriptorTable->descriptorSet().size(),
+                            overlayDescriptorTable->descriptorSet().data(), 2, dynamicOffsets);
 
     context->overlayCommandBuffer->bindVertexBuffers(vertexBuffer)
         ->bindIndexBuffer(indexBuffer, indexType)
@@ -1299,11 +1350,11 @@ void UIModuleContext::postBlur(int times) {
 
         vkCmdBindPipeline(context->overlayCommandBuffer->vkCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                           module->overlayPostPipelines_[BLUR]->vkPipeline());
-
-        auto pipelineLayout = overlayDescriptorTable->vkPipelineLayout();
-
-        vkCmdPushConstants(context->overlayCommandBuffer->vkCommandBuffer(), pipelineLayout, VK_SHADER_STAGE_ALL, 0,
-                           sizeof(int), &i);
+        uint32_t dynamicOffsets[] = {0, Renderer::instance().buffers()->overlayPostUniformOffset(i)};
+        vkCmdBindDescriptorSets(context->overlayCommandBuffer->vkCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                overlayDescriptorTable->vkPipelineLayout(), 0,
+                                overlayDescriptorTable->descriptorSet().size(),
+                                overlayDescriptorTable->descriptorSet().data(), 2, dynamicOffsets);
 
         context->overlayCommandBuffer->draw(3, 1);
 
@@ -1406,6 +1457,12 @@ void UIModuleContext::postBlur(int times) {
     }
 }
 
+void UIModuleContext::refreshOverlayDescriptorTable() {
+    auto context = frameworkContext.lock();
+    auto module = uiModule.lock();
+    module->refreshOverlayDescriptorTable(context->frameIndex);
+}
+
 void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
     auto context = frameworkContext.lock();
     auto framework = context->framework.lock();
@@ -1414,6 +1471,12 @@ void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
 
     overlayMode = NONE;
 
+    overlayDescriptorTable->bindBufferRange(
+        Renderer::instance().buffers()->overlayPostUniformBuffer(), 1, 1, 0,
+        Renderer::instance().buffers()->overlayPostUniformDescriptorRange());
+    overlayDescriptorTable->bindBufferRange(
+        Renderer::instance().buffers()->overlayDrawUniformBuffer(), 1, 0, 0,
+        Renderer::instance().buffers()->overlayDrawUniformDescriptorRange());
     context->overlayCommandBuffer->bindDescriptorTable(overlayDescriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS);
 
     if (lastContext != nullptr)

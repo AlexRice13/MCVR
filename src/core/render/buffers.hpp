@@ -26,7 +26,8 @@ class Buffers : public SharedObject<Buffers> {
                                    std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer);
     void performQueuedUpload();
 
-    void appendOverlayDrawUniform(vk::Data::OverlayUBO &ubo);
+    bool registerOverlayDrawUniformSize(uint32_t size);
+    void appendOverlayDrawUniform(uint8_t *srcPointer, uint32_t size, uint32_t &uniformOffset);
     void appendOverlayPostUniform(vk::Data::OverlayPostUBO &ubo);
     void buildAndUploadOverlayUniformBuffer();
 
@@ -34,43 +35,55 @@ class Buffers : public SharedObject<Buffers> {
     void setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo);
     void setAndUploadTextureMappingBuffer(vk::Data::TextureMapping &mapping);
     void setAndUploadExposureDataBuffer(vk::Data::ExposureData &exposureData);
-    void setAndUploadLightMapUniformBuffer(vk::Data::LightMapUBO &ubo);
 
-    int getDrawID();
     int getPostID();
 
     std::shared_ptr<vk::DeviceLocalBuffer> getBuffer(uint32_t id);
 
     std::shared_ptr<vk::HostVisibleBuffer> overlayDrawUniformBuffer();
+    uint32_t overlayDrawUniformDescriptorRange();
     std::shared_ptr<vk::HostVisibleBuffer> overlayPostUniformBuffer();
+    uint32_t overlayPostUniformDescriptorRange();
+    uint32_t overlayPostUniformOffset(int postID);
 
     std::shared_ptr<vk::HostVisibleBuffer> worldUniformBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> lastWorldUniformBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> skyUniformBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> textureMappingBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> exposureDataBuffer();
-    std::shared_ptr<vk::HostVisibleBuffer> lightMapUniformBuffer();
 
     void setUseJitter(bool useJitter);
 
   private:
     static constexpr uint32_t baseBlockSize = 16 * 1024;
+    static constexpr uint32_t overlayPostUniformInitialSize = 512 * 1024;
+    static constexpr uint32_t overlayDrawUniformInitialSize = 8 * 1024 * 1024;
+    static constexpr uint32_t overlayDrawUniformInitialDescriptorRange = 4 * 1024;
+
+    bool ensureOverlayDrawUniformBufferCapacityLocked(std::shared_ptr<Framework> framework,
+                                                      uint32_t frameIndex,
+                                                      uint32_t requiredBufferSize);
 
     std::vector<std::map<uint32_t, int32_t>> validOverlayIndex_;
     std::vector<std::map<uint32_t, std::shared_ptr<vk::DeviceLocalBuffer>>> overlayIndexVertexBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> overlayDrawUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> overlayPostUniformBuffer_;
     uint32_t overlayNextID_;
-
-    std::shared_ptr<std::vector<vk::Data::OverlayUBO>> overlayDrawUniformQueue_;
-    std::shared_ptr<std::vector<vk::Data::OverlayPostUBO>> overlayPostUniformQueue_;
+    std::vector<std::vector<uint8_t>> overlayDrawUniformData_;
+    std::vector<uint32_t> overlayDrawUniformWriteOffset_;
+    uint32_t overlayDrawUniformAlignment_ = 1;
+    uint32_t overlayDrawUniformDeviceLimit_ = 1;
+    uint32_t overlayDrawUniformDescriptorRange_ = 1;
+    std::vector<std::vector<uint8_t>> overlayPostUniformData_;
+    std::vector<uint32_t> overlayPostUniformCount_;
+    uint32_t overlayPostUniformStride_ = 1;
+    uint32_t overlayPostUniformDescriptorRange_ = 1;
 
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> worldUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> lastWorldUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> skyUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> textureMappingBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> exposureDataBuffer_;
-    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> lightMapUniformBuffer_;
 
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> importantIndexVertexBuffer_;
 

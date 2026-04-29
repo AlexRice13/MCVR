@@ -17,16 +17,6 @@ mat3 buildMirrorMatrix(vec3 normal) {
                 -2.0 * (vec3(normal.z) * normal) + vec3(0.0, 0.0, 1.0));
 }
 
-mat4 buildMirrorMatrix4(vec3 normal, vec3 posOnMirror) {
-    mat3 R = buildMirrorMatrix(normal);
-    vec3 t = posOnMirror - R * posOnMirror;
-
-    return mat4(vec4(R[0], 0.0), //
-                vec4(R[1], 0.0), //
-                vec4(R[2], 0.0), //
-                vec4(t, 1.0));
-}
-
 vec3 reinhardMax(vec3 color) {
     float luminance = max(1e-7, max(max(color.x, color.y), color.z));
     float reinhard = luminance / (luminance + 1);

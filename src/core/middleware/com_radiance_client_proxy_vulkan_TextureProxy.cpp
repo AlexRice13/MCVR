@@ -1,5 +1,6 @@
 #include "com_radiance_client_proxy_vulkan_TextureProxy.h"
 
+#include "core/render/emission.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/textures.hpp"
 
@@ -18,6 +19,9 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_prepar
     if (textures == nullptr) return;
     auto vkFormat = static_cast<VkFormat>(format);
     textures->initializeTexture(id, maxLevel, width, height, vkFormat);
+    if (auto emission = textures->emission(); emission != nullptr) {
+        emission->resetTexture(static_cast<uint32_t>(id));
+    }
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_setFilter(
@@ -56,6 +60,21 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_queueU
     if (textures == nullptr) return;
     textures->queueUpload(reinterpret_cast<uint8_t *>(srcPointer), srcSizeInBytes, srcRowPixels, dstId, srcOffsetX,
                           srcOffsetY, dstOffsetX, dstOffsetY, width, height, level);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_uploadEmissionTileNative(JNIEnv *,
+                                                                                                   jclass,
+                                                                                                   jint textureId,
+                                                                                                   jlong tileKey,
+                                                                                                   jlong cellsPtr,
+                                                                                                   jint cellCount) {
+    auto textures = Renderer::instance().textures();
+    if (textures == nullptr) return;
+    auto emission = textures->emission();
+    if (emission == nullptr) return;
+
+    emission->updateTile(static_cast<uint32_t>(textureId), static_cast<uint64_t>(tileKey),
+                         reinterpret_cast<const EmissionCellUpload *>(cellsPtr), cellCount);
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_performQueuedUpload(JNIEnv *, jclass) {

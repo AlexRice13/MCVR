@@ -6,8 +6,6 @@
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
-layout(set = 0, binding = 1) uniform sampler2D lightMap;
-
 layout(set = 1, binding = 0) uniform WorldUniform {
     WorldUBO worldUBO;
 };
@@ -51,7 +49,7 @@ layout(location = 16) out vec4 overlayColor;
 void main() {
     vec3 pos = inPos + inPostBase;
     if (inCoordinate == 0) {
-        pos = pos - worldUBO.cameraViewMatInv[3].xyz;
+        pos = pos - vec3(worldUBO.cameraPos.xyz);
     } else if (inCoordinate == 1) {
         pos = mat3(worldUBO.cameraViewMatInv) * pos;
     } else if (inCoordinate == 2) {
@@ -80,7 +78,8 @@ void main() {
     gl_Position = worldUBO.cameraProjMat * worldUBO.cameraEffectedViewMat * vec4(pos, 1.0);
 
     if (inUseLight > 0) {
-        lightMapColor = texelFetch(lightMap, inLightUV / 16, 0);
+        lightMapColor =
+            texelFetch(textures[nonuniformEXT(worldUBO.lightMapTextureID)], inLightUV / 16, 0);
     } else {
         lightMapColor = vec4(0.0);
     }

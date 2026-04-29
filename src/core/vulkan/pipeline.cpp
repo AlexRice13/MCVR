@@ -346,7 +346,7 @@ std::shared_ptr<vk::RayTracingPipeline> vk::RayTracingPipelineBuilder::build(std
 
     VkPipeline rayTracingPipeline;
     if (vkCreateRayTracingPipelinesKHR(device->vkDevice(), VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-                                       &rayTracingPipeline) != VK_SUCCESS) {
+                                        &rayTracingPipeline) != VK_SUCCESS) {
         std::cerr << "Cannot build ray tracing pipeline" << std::endl;
         exit(EXIT_FAILURE);
     }

@@ -1,5 +1,7 @@
 #include "core/vulkan/buffer.hpp"
 
+#include "core/render/render_framework.hpp"
+#include "core/render/renderer.hpp"
 #include "core/vulkan/command.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/vma.hpp"
@@ -99,8 +101,8 @@ void vk::HostVisibleBuffer::uploadToBuffer(void *src) {
 }
 
 void vk::HostVisibleBuffer::uploadToBuffer(void *src, size_t size, size_t offset) {
-    std::memcpy(mappedPtr_, src, size);
-    vmaFlushAllocation(vma_->allocator(), allocation_, 0, size);
+    std::memcpy(static_cast<uint8_t *>(mappedPtr_) + offset, src, size);
+    vmaFlushAllocation(vma_->allocator(), allocation_, offset, size);
 }
 
 void vk::HostVisibleBuffer::flush() {
@@ -126,6 +128,17 @@ VkDeviceAddress &vk::HostVisibleBuffer::bufferAddress() {
         exit(EXIT_FAILURE);
     }
     return bufferAddress_;
+}
+
+vk::TemporaryStagingBuffer::TemporaryStagingBuffer(std::shared_ptr<VMA> vma,
+                                                   VkBuffer buffer,
+                                                   VmaAllocation allocation)
+    : vma_(vma), buffer_(buffer), allocation_(allocation) {}
+
+vk::TemporaryStagingBuffer::~TemporaryStagingBuffer() {
+    if (buffer_ != VK_NULL_HANDLE || allocation_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(vma_->allocator(), buffer_, allocation_);
+    }
 }
 
 vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
@@ -266,6 +279,12 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
 }
 
 vk::DeviceLocalBuffer::~DeviceLocalBuffer() {
+    if (transientStagingRetainer_ != nullptr) {
+        stagingBuffer_ = VK_NULL_HANDLE;
+        stagingAllocation_ = VK_NULL_HANDLE;
+        mappedPtr_ = nullptr;
+        transientStagingRetainer_ = nullptr;
+    }
     vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
     vmaDestroyBuffer(vma_->allocator(), buffer_, allocation_);
 
@@ -339,22 +358,26 @@ void vk::DeviceLocalBuffer::uploadToStagingBuffer(void *src, size_t size, size_t
             bufferCerr() << "failed to create staging buffer" << std::endl;
         }
         mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        transientStagingRetainer_ = TemporaryStagingBuffer::create(vma_, stagingBuffer_, stagingAllocation_);
     }
 
-    std::memcpy(mappedPtr_, src, size);
+    std::memcpy(static_cast<uint8_t *>(mappedPtr_) + offset, src, size);
     vmaFlushAllocation(vma_->allocator(), stagingAllocation_, offset, size);
-
-    if (!persistStaging_) {
-        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
-        stagingBuffer_ = VK_NULL_HANDLE;
-        stagingAllocation_ = VK_NULL_HANDLE;
-        mappedPtr_ = nullptr;
-    }
 }
 
 void vk::DeviceLocalBuffer::flushStagingBuffer() {
     if (!persistStaging_) { return; }
     vmaFlushAllocation(vma_->allocator(), stagingAllocation_, 0, size_);
+}
+
+void vk::DeviceLocalBuffer::releaseStaging() {
+    if (!persistStaging_) { return; }
+    if (stagingBuffer_ == VK_NULL_HANDLE && stagingAllocation_ == VK_NULL_HANDLE) { return; }
+
+    vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    stagingBuffer_ = VK_NULL_HANDLE;
+    stagingAllocation_ = VK_NULL_HANDLE;
+    mappedPtr_ = nullptr;
 }
 
 void vk::DeviceLocalBuffer::downloadFromBuffer(VkCommandBuffer cmdBuffer) {
@@ -379,7 +402,7 @@ void vk::DeviceLocalBuffer::uploadToBuffer(VkCommandBuffer cmdBuffer, size_t siz
 }
 
 void vk::DeviceLocalBuffer::uploadToBuffer(std::shared_ptr<CommandBuffer> cmdBuffer) {
-    uploadToBuffer(cmdBuffer->vkCommandBuffer());
+    uploadToBuffer(cmdBuffer, size_, 0, 0);
 }
 
 void vk::DeviceLocalBuffer::uploadToBuffer(std::shared_ptr<CommandBuffer> cmdBuffer,
@@ -387,6 +410,14 @@ void vk::DeviceLocalBuffer::uploadToBuffer(std::shared_ptr<CommandBuffer> cmdBuf
                                            size_t srcOffset,
                                            size_t dstOffset) {
     uploadToBuffer(cmdBuffer->vkCommandBuffer(), size, srcOffset, dstOffset);
+
+    if (!persistStaging_ && transientStagingRetainer_ != nullptr) {
+        Renderer::instance().framework()->frameResourceRetainer().retain(transientStagingRetainer_);
+        transientStagingRetainer_ = nullptr;
+        stagingBuffer_ = VK_NULL_HANDLE;
+        stagingAllocation_ = VK_NULL_HANDLE;
+        mappedPtr_ = nullptr;
+    }
 }
 
 size_t vk::DeviceLocalBuffer::size() {

@@ -9,6 +9,9 @@
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
 
+#include <algorithm>
+#include <unordered_map>
+
 #if defined(_WIN32)
 #    include <windows.h>
 using DYNLIB_HANDLE = HMODULE;
@@ -153,19 +156,6 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_prese
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     framework->present();
-}
-
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_drawOverlay(
-    JNIEnv *, jclass, jint vertexId, jint indexId, jint pipelineType, jint indexCount, jint indexType) {
-    auto framework = Renderer::instance().framework();
-    if (framework == nullptr) return;
-    auto vertexBuffer = Renderer::instance().buffers()->getBuffer(vertexId);
-    auto indexBuffer = Renderer::instance().buffers()->getBuffer(indexId);
-    auto context = framework->safeAcquireCurrentContext();
-    auto pipelineContext = framework->pipeline()->acquirePipelineContext(context);
-    pipelineContext->uiModuleContext->drawIndexed(vertexBuffer, indexBuffer,
-                                                  static_cast<OverlayDrawPipelineType>(pipelineType), indexCount,
-                                                  static_cast<VkIndexType>(indexType));
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_fuseWorld(JNIEnv *, jclass) {

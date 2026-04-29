@@ -21,7 +21,7 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.dlss.name";
     constexpr static uint32_t inputImageNum = 8;
-    constexpr static uint32_t outputImageNum = 2;
+    constexpr static uint32_t outputImageNum = 4;
 
     static bool initNGXContext();
     static void deinitNGXContext();
@@ -69,6 +69,13 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> processedImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> upscaledFirstHitDepthImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upscaledMotionVectorImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upscaledNormalRoughnessImages_;
+
+    std::vector<std::shared_ptr<vk::DescriptorTable>> motionDescriptorTables_;
+    std::shared_ptr<vk::ComputePipeline> firstHitDepthUpscalePipeline_;
+    std::shared_ptr<vk::ComputePipeline> motionUpscalePipeline_;
+    std::shared_ptr<vk::ComputePipeline> normalRoughnessUpscalePipeline_;
 
     std::vector<std::shared_ptr<WorldModuleContext>> contexts_;
 
@@ -92,6 +99,9 @@ struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleCon
     // output
     std::shared_ptr<vk::DeviceLocalImage> processedImage;
     std::shared_ptr<vk::DeviceLocalImage> upscaledFirstHitDepthImage;
+    std::shared_ptr<vk::DeviceLocalImage> upscaledMotionVectorImage;
+    std::shared_ptr<vk::DeviceLocalImage> upscaledNormalRoughnessImage;
+    std::shared_ptr<vk::DescriptorTable> motionDescriptorTable;
 
     DLSSModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
                       std::shared_ptr<WorldPipelineContext> worldPipelineContext,

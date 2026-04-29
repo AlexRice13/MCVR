@@ -9,7 +9,6 @@
 
 namespace vk {
 class DeviceLocalBuffer;
-class HostVisibleBuffer;
 class CommandBuffer;
 class PhysicalDevice;
 class Device;
@@ -164,7 +163,7 @@ class TLASBuilder : public SharedObject<TLASBuilder> {
                                std::shared_ptr<BLAS>>>
             instances;
 
-        std::shared_ptr<HostVisibleBuffer> instanceBuffer;
+        std::shared_ptr<DeviceLocalBuffer> instanceBuffer;
         std::vector<VkAccelerationStructureGeometryKHR> geometries;
 
         TLASInstanceBuilder(TLASBuilder &parent);
@@ -225,6 +224,8 @@ vk::BLASBuilder::BLASGeometryBuilder::defineTriangleGeomrtry(VkDeviceAddress ver
                                                              VkDeviceAddress indexBufferAddress,
                                                              uint32_t numIndices,
                                                              bool isOpaque) {
+    if (numVertices == 0 || numIndices < 3) { return definePlaceholderGeometry(); }
+
     VkAccelerationStructureGeometryKHR geom{};
     geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;

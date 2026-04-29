@@ -271,6 +271,9 @@ void vk::BLASBuilder::batchSubmit(std::vector<std::shared_ptr<BLASBuilder>> &bui
     std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos;
     std::vector<std::vector<VkAccelerationStructureBuildRangeInfoKHR>> buildRanges;
     std::vector<VkAccelerationStructureBuildRangeInfoKHR *> pbuildRanges;
+    buildInfos.reserve(builders.size());
+    buildRanges.reserve(builders.size());
+    pbuildRanges.reserve(builders.size());
 
     for (int i = 0; i < builders.size(); i++) {
         VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
@@ -308,6 +311,9 @@ void vk::BLASBuilder::batchSubmitExternal(std::vector<std::shared_ptr<BLASBuilde
     std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos;
     std::vector<std::vector<VkAccelerationStructureBuildRangeInfoKHR>> buildRanges;
     std::vector<VkAccelerationStructureBuildRangeInfoKHR *> pbuildRanges;
+    buildInfos.reserve(builders.size());
+    buildRanges.reserve(builders.size());
+    pbuildRanges.reserve(builders.size());
 
     for (int i = 0; i < builders.size(); i++) {
         VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
@@ -426,11 +432,11 @@ vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device>
         asInstances[i].accelerationStructureReference = std::get<5>(instances[i])->blasDeviceAddress();
     }
 
-    instanceBuffer =
-        HostVisibleBuffer::create(vma, device, sizeof(VkAccelerationStructureInstanceKHR) * instances.size(),
-                                  VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-    instanceBuffer->uploadToBuffer(asInstances.data());
+    instanceBuffer = DeviceLocalBuffer::create(
+        vma, device, false, sizeof(VkAccelerationStructureInstanceKHR) * instances.size(),
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+        0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 16);
+    instanceBuffer->uploadToStagingBuffer(asInstances.data());
 
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -499,6 +505,18 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(std::shared_pt
 
 std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device> device,
                                                           std::shared_ptr<CommandBuffer> commandBuffer) {
+    tlasInstanceBuilder_.instanceBuffer->uploadToBuffer(commandBuffer);
+    std::vector<vk::CommandBuffer::BufferMemoryBarrier> bufferBarriers{{
+        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = tlasInstanceBuilder_.instanceBuffer,
+    }};
+    commandBuffer->barriersBufferImage(bufferBarriers, {});
+
     VkAccelerationStructureCreateInfoKHR tlasCreateInfo{};
     tlasCreateInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     tlasCreateInfo.buffer = tlasBuffer_->vkBuffer();

@@ -123,7 +123,7 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
         } else if (key == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
             if (tryParseFloat(value, floatValue)) maxExposure_ = std::max(floatValue, 1e-6f);
         } else if (key == "render_pipeline.module.tone_mapping.attribute.enable_auto_exposure") {
-            autoExposure_ = parseBoolValue(value, autoExposure_);
+            isAutoExposureEnabled_ = parseBoolValue(value, isAutoExposureEnabled_);
         } else if (key == "render_pipeline.module.tone_mapping.attribute.manual_exposure") {
             if (tryParseFloat(value, floatValue)) manualExposure_ = std::max(floatValue, 1e-6f);
         } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_bias") {
@@ -133,7 +133,7 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
         } else if (key == "render_pipeline.module.tone_mapping.attribute.saturation") {
             if (tryParseFloat(value, floatValue)) saturation_ = std::max(floatValue, 0.0f);
         } else if (key == "render_pipeline.module.tone_mapping.attribute.clamp_output") {
-            clampOutput_ = parseBoolValue(value, clampOutput_);
+            shouldClampOutput_ = parseBoolValue(value, shouldClampOutput_);
         } else if (key == "render_pipeline.module.tone_mapping.attribute.method") {
             toneMappingMethod_ = parseToneMappingMethodValue(value, toneMappingMethod_);
         } else if (key == "render_pipeline.module.tone_mapping.attribute.exposure_metering_mode") {
@@ -496,8 +496,8 @@ void ToneMappingModuleContext::render() {
     pc.saturation = std::max(module->saturation_, 0.0f);
     pc.toneMappingMethod = std::clamp(module->toneMappingMethod_, static_cast<int>(TONE_MAPPING_METHOD_PBR_NEUTRAL),
                                       static_cast<int>(TONE_MAPPING_METHOD_UNCHARTED2));
-    pc.autoExposure = module->autoExposure_ ? 1 : 0;
-    pc.clampOutput = module->clampOutput_ ? 1 : 0;
+    pc.autoExposure = module->isAutoExposureEnabled_ ? 1 : 0;
+    pc.clampOutput = module->shouldClampOutput_ ? 1 : 0;
     pc.exposureMeteringMode =
         std::clamp(module->exposureMeteringMode_, static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL),
                    static_cast<int>(TONE_MAPPING_EXPOSURE_METERING_MODE_CENTER));

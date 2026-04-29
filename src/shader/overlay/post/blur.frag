@@ -5,12 +5,8 @@
 #include "common/shared.hpp"
 
 layout(set = 0, binding = 1) uniform sampler2D frame;
-layout(set = 1, binding = 1) readonly buffer Storage {
-    OverlayPostUBO ubos[];
-};
-
-layout(push_constant) uniform Push {
-    uint postId;
+layout(std140, set = 1, binding = 1) uniform PostUniform {
+    OverlayPostUBO ubo;
 };
 
 layout(location = 0) in vec2 texCoord;
@@ -23,7 +19,7 @@ layout(location = 0) out vec4 fragColor;
 // In the end we sample the last pixel with a half weight, since the amount of pixels to sample is always odd (actualRadius * 2 + 1).
 void main() {
     vec4 blurred = vec4(0.0);
-    float actualRadius = round(ubos[postId].radius * ubos[postId].radiusMultiplier);
+    float actualRadius = round(ubo.radius * ubo.radiusMultiplier);
     for (float a = -actualRadius + 0.5; a <= actualRadius; a += 2.0) {
         blurred += texture(frame, texCoord + sampleStep * a);
     }

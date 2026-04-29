@@ -144,8 +144,8 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     float saturation_ = 1.0f;
 
     int toneMappingMethod_ = TONE_MAPPING_METHOD_ACES_FITTED;
-    bool autoExposure_ = true;
-    bool clampOutput_ = true;
+    bool isAutoExposureEnabled_ = true;
+    bool shouldClampOutput_ = true;
     int exposureMeteringMode_ = TONE_MAPPING_EXPOSURE_METERING_MODE_GLOBAL;
     float centerMeteringPercent_ = 20.0f;
 

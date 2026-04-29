@@ -5,6 +5,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+
 std::shared_ptr<NgxContext> DLSSModule::ngxContext_ = nullptr;
 
 bool DLSSModule::initNGXContext() {
@@ -63,6 +65,9 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     firstHitDepthImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
+    upscaledMotionVectorImages_.resize(size);
+    upscaledNormalRoughnessImages_.resize(size);
+    motionDescriptorTables_.resize(size);
 
     dlss_ = DlssRR::create();
 }
@@ -176,10 +181,29 @@ bool DLSSModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceL
     if (images[1] == nullptr) {
         upscaledFirstHitDepthImages_[frameIndex] = images[1] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, outputWidth_, outputHeight_, 1, formats[1],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     } else {
         if (images[1]->width() != outputWidth_ || images[1]->height() != outputHeight_) return false;
         upscaledFirstHitDepthImages_[frameIndex] = images[1];
+    }
+
+    if (images[2] == nullptr) {
+        upscaledMotionVectorImages_[frameIndex] = images[2] = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, outputWidth_, outputHeight_, 1, formats[2],
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    } else {
+        if (images[2]->width() != outputWidth_ || images[2]->height() != outputHeight_) return false;
+        upscaledMotionVectorImages_[frameIndex] = images[2];
+    }
+
+    if (images[3] == nullptr) {
+        upscaledNormalRoughnessImages_[frameIndex] = images[3] = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, outputWidth_, outputHeight_, 1, formats[3],
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    } else {
+        if (images[3]->width() != outputWidth_ || images[3]->height() != outputHeight_) return false;
+        upscaledNormalRoughnessImages_[frameIndex] = images[3];
     }
 
     return true;
@@ -213,6 +237,78 @@ void DLSSModule::build() {
     dlssRRInitInfo.outputSize = {outputWidth_, outputHeight_};
     dlssRRInitInfo.quality = mode_;
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
+
+    auto firstHitDepthShader = vk::Shader::create(
+        framework->device(), (Renderer::folderPath / "shaders/world/upscaler/upscale_first_hit_depth_comp.spv").string());
+    auto motionShader = vk::Shader::create(
+        framework->device(), (Renderer::folderPath / "shaders/world/upscaler/upscale_motion_vector_comp.spv").string());
+    auto normalRoughnessShader = vk::Shader::create(
+        framework->device(), (Renderer::folderPath / "shaders/world/upscaler/upscale_normal_roughness_comp.spv").string());
+    for (uint32_t i = 0; i < size; i++) {
+        motionDescriptorTables_[i] = vk::DescriptorTableBuilder{}
+                                         .beginDescriptorLayoutSet()
+                                         .beginDescriptorLayoutSetBinding()
+                                         .defineDescriptorLayoutSetBinding({
+                                             .binding = 0,
+                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                             .descriptorCount = 1,
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         })
+                                         .defineDescriptorLayoutSetBinding({
+                                             .binding = 1,
+                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                             .descriptorCount = 1,
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         })
+                                         .defineDescriptorLayoutSetBinding({
+                                             .binding = 2,
+                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                             .descriptorCount = 1,
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         })
+                                         .defineDescriptorLayoutSetBinding({
+                                             .binding = 4,
+                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                             .descriptorCount = 1,
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         })
+                                         .defineDescriptorLayoutSetBinding({
+                                             .binding = 5,
+                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                             .descriptorCount = 1,
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         })
+                                         .defineDescriptorLayoutSetBinding({
+                                             .binding = 6,
+                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                             .descriptorCount = 1,
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         })
+                                         .endDescriptorLayoutSetBinding()
+                                         .endDescriptorLayoutSet()
+                                         .definePushConstant({
+                                             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                             .offset = 0,
+                                             .size = sizeof(MotionUpscalePushConstants),
+                                         })
+                                         .build(framework->device());
+        motionDescriptorTables_[i]->bindImage(motionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        motionDescriptorTables_[i]->bindImage(upscaledMotionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+        motionDescriptorTables_[i]->bindImage(normalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        motionDescriptorTables_[i]->bindImage(upscaledNormalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+    }
+    firstHitDepthUpscalePipeline_ = vk::ComputePipelineBuilder{}
+                                        .defineShader(firstHitDepthShader)
+                                        .definePipelineLayout(motionDescriptorTables_[0])
+                                        .build(framework->device());
+    motionUpscalePipeline_ = vk::ComputePipelineBuilder{}
+                                 .defineShader(motionShader)
+                                 .definePipelineLayout(motionDescriptorTables_[0])
+                                 .build(framework->device());
+    normalRoughnessUpscalePipeline_ = vk::ComputePipelineBuilder{}
+                                          .defineShader(normalRoughnessShader)
+                                          .definePipelineLayout(motionDescriptorTables_[0])
+                                          .build(framework->device());
 
     contexts_.resize(size);
 
@@ -248,7 +344,10 @@ DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> framework
       specularHitDepthImage(dlssModule->specularHitDepthImages_[frameworkContext->frameIndex]),
       firstHitDepthImage(dlssModule->firstHitDepthImages_[frameworkContext->frameIndex]),
       processedImage(dlssModule->processedImages_[frameworkContext->frameIndex]),
-      upscaledFirstHitDepthImage(dlssModule->upscaledFirstHitDepthImages_[frameworkContext->frameIndex]) {}
+      upscaledFirstHitDepthImage(dlssModule->upscaledFirstHitDepthImages_[frameworkContext->frameIndex]),
+      upscaledMotionVectorImage(dlssModule->upscaledMotionVectorImages_[frameworkContext->frameIndex]),
+      upscaledNormalRoughnessImage(dlssModule->upscaledNormalRoughnessImages_[frameworkContext->frameIndex]),
+      motionDescriptorTable(dlssModule->motionDescriptorTables_[frameworkContext->frameIndex]) {}
 
 void DLSSModuleContext::render() {
     auto context = frameworkContext.lock();
@@ -257,6 +356,150 @@ void DLSSModuleContext::render() {
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = dLSSModule.lock();
+
+    auto dispatchUpscaledFirstHitDepth = [&]() {
+        worldCommandBuffer->barriersBufferImage(
+            {},
+            {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+              .oldLayout = firstHitDepthImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = firstHitDepthImage,
+              .subresourceRange = vk::wholeColorSubresourceRange},
+             {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .oldLayout = upscaledFirstHitDepthImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = upscaledFirstHitDepthImage,
+              .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        motionDescriptorTable->bindImage(firstHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 0);
+        motionDescriptorTable->bindImage(upscaledFirstHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+
+        MotionUpscalePushConstants pushConstants{
+            static_cast<float>(module->outputWidth_) / static_cast<float>(std::max(1u, module->inputWidth_)),
+            static_cast<float>(module->outputHeight_) / static_cast<float>(std::max(1u, module->inputHeight_)),
+            module->inputWidth_,
+            module->inputHeight_,
+            module->outputWidth_,
+            module->outputHeight_,
+        };
+
+        worldCommandBuffer->bindDescriptorTable(motionDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->firstHitDepthUpscalePipeline_);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), motionDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->outputWidth_ + 15) / 16,
+                      (module->outputHeight_ + 15) / 16, 1);
+    };
+
+    auto dispatchUpscaledMotion = [&]() {
+        worldCommandBuffer->barriersBufferImage(
+            {},
+            {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+              .oldLayout = motionVectorImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = motionVectorImage,
+              .subresourceRange = vk::wholeColorSubresourceRange},
+             {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .oldLayout = upscaledMotionVectorImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = upscaledMotionVectorImage,
+              .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        motionVectorImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        upscaledMotionVectorImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        motionDescriptorTable->bindImage(motionVectorImage, VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        motionDescriptorTable->bindImage(upscaledMotionVectorImage, VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+
+        MotionUpscalePushConstants pushConstants{
+            static_cast<float>(module->outputWidth_) / static_cast<float>(std::max(1u, module->inputWidth_)),
+            static_cast<float>(module->outputHeight_) / static_cast<float>(std::max(1u, module->inputHeight_)),
+            module->inputWidth_,
+            module->inputHeight_,
+            module->outputWidth_,
+            module->outputHeight_,
+        };
+
+        worldCommandBuffer->bindDescriptorTable(motionDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->motionUpscalePipeline_);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), motionDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->outputWidth_ + 15) / 16,
+                      (module->outputHeight_ + 15) / 16, 1);
+    };
+
+    auto dispatchUpscaledNormalRoughness = [&]() {
+        worldCommandBuffer->barriersBufferImage(
+            {},
+            {{.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+              .oldLayout = normalRoughnessImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = normalRoughnessImage,
+              .subresourceRange = vk::wholeColorSubresourceRange},
+             {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .oldLayout = upscaledNormalRoughnessImage->imageLayout(),
+              .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+              .srcQueueFamilyIndex = mainQueueIndex,
+              .dstQueueFamilyIndex = mainQueueIndex,
+              .image = upscaledNormalRoughnessImage,
+              .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        normalRoughnessImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        upscaledNormalRoughnessImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        motionDescriptorTable->bindImage(normalRoughnessImage, VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        motionDescriptorTable->bindImage(upscaledNormalRoughnessImage, VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+
+        MotionUpscalePushConstants pushConstants{
+            static_cast<float>(module->outputWidth_) / static_cast<float>(std::max(1u, module->inputWidth_)),
+            static_cast<float>(module->outputHeight_) / static_cast<float>(std::max(1u, module->inputHeight_)),
+            module->inputWidth_,
+            module->inputHeight_,
+            module->outputWidth_,
+            module->outputHeight_,
+        };
+
+        worldCommandBuffer->bindDescriptorTable(motionDescriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->normalRoughnessUpscalePipeline_);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), motionDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->outputWidth_ + 15) / 16,
+                      (module->outputHeight_ + 15) / 16, 1);
+    };
 
     {
         worldCommandBuffer->barriersBufferImage(
@@ -374,54 +617,7 @@ void DLSSModuleContext::render() {
         }
     }
 
-    worldCommandBuffer->barriersBufferImage(
-        {}, {{
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .oldLayout = firstHitDepthImage->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = firstHitDepthImage,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
-             },
-             {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .oldLayout = upscaledFirstHitDepthImage->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = upscaledFirstHitDepthImage,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
-             }});
-    firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-
-    // TODO: add to command buffer
-    VkImageBlit imageBlit{};
-    imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
-    imageBlit.srcSubresource.layerCount = 1;
-    imageBlit.srcOffsets[0] = {0, 0, 0};
-    imageBlit.srcOffsets[1] = {static_cast<int>(firstHitDepthImage->width()),
-                               static_cast<int>(firstHitDepthImage->height()), 1};
-    imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
-    imageBlit.dstSubresource.layerCount = 1;
-    imageBlit.dstOffsets[0] = {0, 0, 0};
-    imageBlit.dstOffsets[1] = {static_cast<int>(upscaledFirstHitDepthImage->width()),
-                               static_cast<int>(upscaledFirstHitDepthImage->height()), 1};
-
-    vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), firstHitDepthImage->vkImage(),
-                   firstHitDepthImage->imageLayout(), upscaledFirstHitDepthImage->vkImage(),
-                   upscaledFirstHitDepthImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
+    dispatchUpscaledFirstHitDepth();
+    dispatchUpscaledMotion();
+    dispatchUpscaledNormalRoughness();
 }

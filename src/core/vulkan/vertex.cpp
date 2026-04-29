@@ -8,6 +8,8 @@ uint32_t vk::Vertex::packMaterialFlags(const VertexFormat::PBRVertex &vertex) {
     packed |= vertex.useTexture > 0 ? useTextureBit : 0u;
     packed |= vertex.useOverlay > 0 ? useOverlayBit : 0u;
     packed |= vertex.useGlint > 0 ? useGlintBit : 0u;
+    packed |= vertex.useNorm > 0 ? useNormBit : 0u;
+    packed |= vertex.useLight > 0 ? useLightBit : 0u;
     packed |= (vertex.alphaMode & 0xFu) << alphaModeShift;
     packed |= (vertex.coordinate & 0xFu) << coordinateShift;
     return packed;
@@ -30,10 +32,9 @@ vk::VertexFormat::MaterialVertex vk::Vertex::makeMaterialVertex(const VertexForm
         .glintUV = vertex.glintUV,
         .glintTexture = vertex.glintTexture,
         .albedoEmission = vertex.albedoEmission,
+        .lightUV = vertex.lightUV,
         .packedData = packMaterialFlags(vertex),
         .pad0 = 0,
-        .pad1 = 0,
-        .pad2 = 0,
     };
 }
 

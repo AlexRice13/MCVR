@@ -2,20 +2,25 @@
 #define VERTEX_GLSL
 
 #include "common/shared.hpp"
+#include "common/constants.glsl"
 
-const uint useColorLayerBit = 1u << 0u;
-const uint useTextureBit = 1u << 1u;
-const uint useOverlayBit = 1u << 2u;
-const uint useGlintBit = 1u << 3u;
-const uint alphaModeShift = 8u;
-const uint coordinateShift = 12u;
+const uint USE_COLOR_LAYER_BIT = 1u << 0u;
+const uint USE_TEXTURE_BIT = 1u << 1u;
+const uint USE_OVERLAY_BIT = 1u << 2u;
+const uint USE_GLINT_BIT = 1u << 3u;
+const uint USE_NORM_BIT = 1u << 4u;
+const uint USE_LIGHT_BIT = 1u << 5u;
+const uint ALPHA_MODE_SHIFT = 8u;
+const uint COORDINATE_SHIFT = 12u;
+const uint NO_HEIGHT_SURFACE_BIT = 1u << 16u;
 
-layout(set = 1, binding = 6) readonly buffer PositionBufferAddr {
+#ifndef CONST_ONLY
+layout(set = 1, binding = 4) readonly buffer PositionBufferAddr {
     uint64_t addrs[];
 }
 positionBufferAddrs;
 
-layout(set = 1, binding = 7) readonly buffer MaterialBufferAddr {
+layout(set = 1, binding = 5) readonly buffer MaterialBufferAddr {
     uint64_t addrs[];
 }
 materialBufferAddrs;
@@ -35,27 +40,39 @@ uint getGeometryBufferIndex(uint instanceID, uint geometryID) {
 }
 
 bool hasColorLayer(uint packedData) {
-    return (packedData & useColorLayerBit) != 0u;
+    return (packedData & USE_COLOR_LAYER_BIT) != 0u;
 }
 
 bool hasTexture(uint packedData) {
-    return (packedData & useTextureBit) != 0u;
+    return (packedData & USE_TEXTURE_BIT) != 0u;
 }
 
 bool hasOverlay(uint packedData) {
-    return (packedData & useOverlayBit) != 0u;
+    return (packedData & USE_OVERLAY_BIT) != 0u;
 }
 
 bool hasGlint(uint packedData) {
-    return (packedData & useGlintBit) != 0u;
+    return (packedData & USE_GLINT_BIT) != 0u;
+}
+
+bool hasNorm(uint packedData) {
+    return (packedData & USE_NORM_BIT) != 0u;
+}
+
+bool hasLight(uint packedData) {
+    return (packedData & USE_LIGHT_BIT) != 0u;
+}
+
+bool hasNoHeightSurface(uint packedData) {
+    return (packedData & NO_HEIGHT_SURFACE_BIT) != 0u;
 }
 
 uint getAlphaMode(uint packedData) {
-    return (packedData >> alphaModeShift) & 0xFu;
+    return (packedData >> ALPHA_MODE_SHIFT) & 0xFu;
 }
 
 uint getCoordinate(uint packedData) {
-    return (packedData >> coordinateShift) & 0xFu;
+    return (packedData >> COORDINATE_SHIFT) & 0xFu;
 }
 
 void loadTriangleIndices(uint geometryBufferIndex, uint primitiveID, out uint i0, out uint i1, out uint i2) {
@@ -107,5 +124,6 @@ void loadTriangle(uint geometryBufferIndex,
     loadTrianglePositions(geometryBufferIndex, i0, i1, i2, p0, p1, p2);
     loadTriangleMaterial(geometryBufferIndex, i0, i1, i2, m0, m1, m2);
 }
+#endif
 
 #endif

@@ -5,6 +5,7 @@
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
+#include <atomic>
 #include <functional>
 #include <map>
 
@@ -23,6 +24,7 @@ class Framework;
 class FrameworkContext;
 class WorldModule;
 class WorldModuleContext;
+class ShaderPack;
 class UIModule;
 class UIModuleContext;
 
@@ -58,6 +60,7 @@ class WorldPipeline : public SharedObject<WorldPipeline> {
 
     std::vector<std::shared_ptr<WorldModule>> &worldModules();
     std::vector<std::shared_ptr<WorldPipelineContext>> &contexts();
+    std::shared_ptr<ShaderPack> shaderPack();
 
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
 
@@ -66,6 +69,7 @@ class WorldPipeline : public SharedObject<WorldPipeline> {
 
     std::vector<std::shared_ptr<WorldModule>> worldModules_;
     std::vector<std::vector<std::shared_ptr<vk::DeviceLocalImage>>> sharedImages_;
+    std::shared_ptr<ShaderPack> shaderPack_;
 
     std::vector<std::shared_ptr<WorldPipelineContext>> contexts_;
 };
@@ -94,6 +98,9 @@ class Pipeline : public SharedObject<Pipeline> {
     static std::map<std::string, std::pair<uint32_t, uint32_t>> worldModuleInOutImageNums;
     static std::map<std::string, std::function<void()>> worldModuleStaticPreCloser;
     static void collectWorldModules();
+    static void beginNativeRebuild();
+    static void endNativeRebuild();
+    static bool nativeRebuildActive();
 
   public:
     Pipeline();
@@ -112,9 +119,11 @@ class Pipeline : public SharedObject<Pipeline> {
 
     std::shared_ptr<WorldPipelineBlueprint> worldPipelineBlueprint();
 
-    bool needRecreate = false;
+    bool isRecreationNeeded = false;
 
   private:
+    static std::atomic<bool> nativeRebuildActive_;
+
     std::weak_ptr<Framework> framework_;
 
     std::shared_ptr<UIModule> uiModule_;

@@ -24,8 +24,8 @@ class FSRUpscalerModule : public WorldModule, public SharedObject<FSRUpscalerMod
     };
 
     static constexpr const char *NAME = "render_pipeline.module.fsr_upscaler.name";
-    static constexpr uint32_t inputImageNum = 4;  // color, depth, motion vectors, firstHitDepth
-    static constexpr uint32_t outputImageNum = 2; // upscaled HDR output, upscaled firstHitDepth
+    static constexpr uint32_t inputImageNum = 5;  // color, depth, motion vectors, firstHitDepth, normalRoughness
+    static constexpr uint32_t outputImageNum = 4; // upscaled HDR output, upscaled firstHitDepth, motion, normalRoughness
 
     static bool isQualityModeAttributeKey(const std::string &key);
     static bool parseQualityModeValue(const std::string &value, QualityMode &outMode);
@@ -86,6 +86,9 @@ class FSRUpscalerModule : public WorldModule, public SharedObject<FSRUpscalerMod
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> fsrMotionVectorImages_;
     std::vector<std::shared_ptr<vk::DescriptorTable>> depthDescriptorTables_;
     std::shared_ptr<vk::ComputePipeline> depthConversionPipeline_;
+    std::shared_ptr<vk::ComputePipeline> firstHitDepthUpscalePipeline_;
+    std::shared_ptr<vk::ComputePipeline> motionUpscalePipeline_;
+    std::shared_ptr<vk::ComputePipeline> normalRoughnessUpscalePipeline_;
 
     // Camera state for reset detection
     glm::vec3 lastCameraPos_ = glm::vec3(0.0f);
@@ -93,8 +96,8 @@ class FSRUpscalerModule : public WorldModule, public SharedObject<FSRUpscalerMod
     bool firstFrame_ = true;
 
     // Temporal storage for images during setOrCreate
-    std::vector<std::array<std::shared_ptr<vk::DeviceLocalImage>, 4>> inputImages_;
-    std::vector<std::array<std::shared_ptr<vk::DeviceLocalImage>, 2>> outputImages_;
+    std::vector<std::array<std::shared_ptr<vk::DeviceLocalImage>, 5>> inputImages_;
+    std::vector<std::array<std::shared_ptr<vk::DeviceLocalImage>, 4>> outputImages_;
 };
 
 class FSRUpscalerModuleContext : public WorldModuleContext {
@@ -110,10 +113,13 @@ class FSRUpscalerModuleContext : public WorldModuleContext {
     std::shared_ptr<vk::DeviceLocalImage> inputDepthImage;
     std::shared_ptr<vk::DeviceLocalImage> inputMotionVectorImage;
     std::shared_ptr<vk::DeviceLocalImage> inputFirstHitDepthImage;
+    std::shared_ptr<vk::DeviceLocalImage> inputNormalRoughnessImage;
 
     // Outputs (display resolution)
     std::shared_ptr<vk::DeviceLocalImage> outputImage;
     std::shared_ptr<vk::DeviceLocalImage> upscaledFirstHitDepthImage;
+    std::shared_ptr<vk::DeviceLocalImage> upscaledMotionVectorImage;
+    std::shared_ptr<vk::DeviceLocalImage> upscaledNormalRoughnessImage;
 
     std::shared_ptr<vk::DescriptorTable> depthDescriptorTable;
     std::shared_ptr<vk::DeviceLocalImage> deviceDepthImage;

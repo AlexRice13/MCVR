@@ -200,9 +200,11 @@ std::shared_ptr<vk::CommandBuffer> vk::CommandBuffer::endRenderPass() {
 std::shared_ptr<vk::CommandBuffer>
 vk::CommandBuffer::bindDescriptorTable(std::shared_ptr<DescriptorTable> descriptorTable,
                                        VkPipelineBindPoint bindPoint) {
+    uint32_t dynamicCount = descriptorTable->dynamicDescriptorCount();
+    std::vector<uint32_t> dynamicOffsets(dynamicCount, 0); // fallback, still need to update later!
     vkCmdBindDescriptorSets(commandBuffer_, bindPoint, descriptorTable->vkPipelineLayout(), 0,
-                            descriptorTable->descriptorSet().size(), descriptorTable->descriptorSet().data(), 0,
-                            nullptr);
+                            descriptorTable->descriptorSet().size(), descriptorTable->descriptorSet().data(),
+                            dynamicCount, dynamicOffsets.empty() ? nullptr : dynamicOffsets.data());
     return shared_from_this();
 }
 
@@ -259,6 +261,11 @@ vk::CommandBuffer::raytracing(std::shared_ptr<SBT> sbt, uint32_t width, uint32_t
 
 std::shared_ptr<vk::CommandBuffer> vk::CommandBuffer::end() {
     vkEndCommandBuffer(commandBuffer_);
+    return shared_from_this();
+}
+
+std::shared_ptr<vk::CommandBuffer> vk::CommandBuffer::reset(VkCommandBufferResetFlags flags) {
+    vkResetCommandBuffer(commandBuffer_, flags);
     return shared_from_this();
 }
 

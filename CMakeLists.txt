@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(minecraft-vulkan-renderer)
+project(minecraft-vulkan-renderer LANGUAGES C CXX)
 
 if(NOT DEFINED JAVA_PROJECT_ROOT_DIR OR "${JAVA_PROJECT_ROOT_DIR}" STREQUAL "")
     message(FATAL_ERROR "JAVA_PROJECT_ROOT_DIR is required. Pass -DJAVA_PROJECT_ROOT_DIR=/path/to/root/of/the/java/project/")
@@ -10,6 +10,7 @@ else()
     message(STATUS "JAVA_PROJECT_ROOT_DIR: ${JAVA_PROJECT_ROOT_DIR}")
 endif()
 
+set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 23)
 if(MSVC)
     add_compile_definitions($<$<CONFIG:Debug>:DEBUG>)
@@ -56,6 +57,11 @@ set(VK_XML_PATH ${PROJECT_SOURCE_DIR}/extern/vulkan_headers/registry/vk.xml)
 # STB
 set(STB_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/stb)
 
+# tinyexpr
+add_library(tinyexpr STATIC extern/tinyexpr/tinyexpr.c)
+set_target_properties(tinyexpr PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set(TINYEXPR_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/tinyexpr)
+
 # DLSS
 add_subdirectory(extern/DLSS EXCLUDE_FROM_ALL)
 
@@ -70,6 +76,9 @@ if(USE_AMD)
 else()
     message(STATUS "AMD Support Disabled")
 endif()
+
+set(MCVR_BUILT_IN_SHADER_PACKS vanilla-pt advanced)
+message(STATUS "Built-in shader packs: ${MCVR_BUILT_IN_SHADER_PACKS}")
 
 # FidelityFX Upscaler (FSR3 Upscaler only)
 option(MCVR_ENABLE_FFX_UPSCALER "Enable FidelityFX Upscaler support" ON)

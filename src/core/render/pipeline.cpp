@@ -9,6 +9,7 @@
 #include "core/render/modules/world/nrd/nrd_module.hpp"
 #include "core/render/modules/world/post_render/post_render_module.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/render/modules/world/svgf/svgf_module.hpp"
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
@@ -73,6 +74,7 @@ void WorldPipeline::dumpSharedImages(const char *label) const {
 void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<Pipeline> pipeline) {
     auto blueprint = pipeline->worldPipelineBlueprint();
     uint32_t frameNum = framework->swapchain()->imageCount();
+    const bool reportNativeProgress = Pipeline::nativeRebuildActive();
 
     worldModules_.resize(blueprint->moduleNames_.size());
     sharedImages_.resize(frameNum,
@@ -88,6 +90,21 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 #endif
         );
+    }
+
+    shaderPack_ = nullptr;
+    for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
+        if (blueprint->moduleNames_[i] != RayTracingModule::NAME) { continue; }
+
+        auto buildConfig = ShaderPack::buildConfigFromRayTracingAttributes(blueprint->attributeKVs_[i]);
+        auto shaderPack = std::make_shared<ShaderPack>(framework);
+        std::string error;
+        if (!shaderPack->initialize(buildConfig, error)) {
+            std::cerr << "[World Pipeline] Failed to load shared shader pack. Reason: " << error << std::endl;
+            throw std::runtime_error("failed to load shared shader pack");
+        }
+        shaderPack_ = shaderPack;
+        break;
     }
 
     for (int i = blueprint->moduleNames_.size() - 1; i >= 0; i--) {
@@ -143,6 +160,7 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         contexts_[i] = WorldPipelineContext::create(framework->contexts()[i], shared_from_this());
     }
+
 }
 
 std::vector<std::shared_ptr<WorldModule>> &WorldPipeline::worldModules() {
@@ -151,6 +169,10 @@ std::vector<std::shared_ptr<WorldModule>> &WorldPipeline::worldModules() {
 
 std::vector<std::shared_ptr<WorldPipelineContext>> &WorldPipeline::contexts() {
     return contexts_;
+}
+
+std::shared_ptr<ShaderPack> WorldPipeline::shaderPack() {
+    return shaderPack_;
 }
 
 void WorldPipeline::bindTexture(std::shared_ptr<vk::Sampler> sampler,
@@ -244,6 +266,19 @@ std::map<std::string,
     Pipeline::worldModuleConstructors{};
 std::map<std::string, std::pair<uint32_t, uint32_t>> Pipeline::worldModuleInOutImageNums{};
 std::map<std::string, std::function<void()>> Pipeline::worldModuleStaticPreCloser{};
+std::atomic<bool> Pipeline::nativeRebuildActive_{false};
+
+void Pipeline::beginNativeRebuild() {
+    nativeRebuildActive_.store(true, std::memory_order_release);
+}
+
+void Pipeline::endNativeRebuild() {
+    nativeRebuildActive_.store(false, std::memory_order_release);
+}
+
+bool Pipeline::nativeRebuildActive() {
+    return nativeRebuildActive_.load(std::memory_order_acquire);
+}
 
 void Pipeline::collectWorldModules() {
     worldModuleConstructors.clear();
@@ -380,23 +415,36 @@ void Pipeline::init(std::shared_ptr<Framework> framework) {
 }
 
 void Pipeline::buildWorldPipelineBlueprint(WorldPipelineBuildParams *params) {
+    beginNativeRebuild();
     worldPipelineBlueprint_ = WorldPipelineBlueprint::create(params);
-    needRecreate = true;
+    isRecreationNeeded = true;
 }
 
 void Pipeline::recreate(std::shared_ptr<Framework> framework) {
-    auto &gc = framework->gc();
+    const bool reportNativeProgress = Pipeline::nativeRebuildActive();
+    auto &frr = framework->frameResourceRetainer();
+    std::vector<OverlayDynamicDrawShaderInfo> overlayDynamicDrawShaders;
+    if (uiModule_ != nullptr) {
+        overlayDynamicDrawShaders = uiModule_->overlayDynamicDrawShaders();
+    }
 
-    gc.collect(uiModule_);
+    frr.retain(uiModule_);
     uiModule_ = UIModule::create(framework);
+    for (const auto &shaderInfo : overlayDynamicDrawShaders) {
+        uiModule_->registerOverlayDrawShader(shaderInfo.key, shaderInfo.vertexFormatType,
+                                             shaderInfo.drawMode, shaderInfo.uniformSize,
+                                             shaderInfo.vertexShaderPath,
+                                             shaderInfo.fragmentShaderPath,
+                                             shaderInfo.definitions);
+    }
 
     if (worldPipeline_ != nullptr)
         for (auto &module : worldPipeline_->worldModules()) { module->preClose(); }
-    gc.collect(worldPipeline_);
+    frr.retain(worldPipeline_);
     worldPipeline_ =
         worldPipelineBlueprint_ == nullptr ? nullptr : WorldPipeline::create(framework, shared_from_this());
 
-    gc.collect(contexts_);
+    frr.retain(contexts_);
     contexts_ = std::make_shared<std::vector<std::shared_ptr<PipelineContext>>>();
 
     uint32_t size = framework->swapchain()->imageCount();

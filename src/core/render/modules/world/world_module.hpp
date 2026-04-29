@@ -5,6 +5,7 @@
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
+#include <cstdint>
 #include <map>
 
 class Framework;
@@ -13,6 +14,15 @@ class WorldPipeline;
 struct WorldPipelineContext;
 
 struct WorldModuleContext;
+
+struct MotionUpscalePushConstants {
+    float scaleX;
+    float scaleY;
+    uint32_t srcWidth;
+    uint32_t srcHeight;
+    uint32_t dstWidth;
+    uint32_t dstHeight;
+};
 
 class WorldModule {
   public:

@@ -3,12 +3,8 @@
 
 #include "common/shared.hpp"
 
-layout(set = 1, binding = 1) readonly buffer Storage {
-    OverlayPostUBO ubos[];
-};
-
-layout(push_constant) uniform Push {
-    uint postId;
+layout(std140, set = 1, binding = 1) uniform PostUniform {
+    OverlayPostUBO ubo;
 };
 
 layout(location = 0) out vec2 texCoord;
@@ -29,8 +25,8 @@ void main() {
 
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
 
-    vec2 oneTexel = 1.0 / ubos[postId].inSize;
-    sampleStep = oneTexel * ubos[postId].blurDir;
+    vec2 oneTexel = 1.0 / ubo.inSize;
+    sampleStep = oneTexel * ubo.blurDir;
 
     texCoord = texCoords[gl_VertexIndex].xy;
 }

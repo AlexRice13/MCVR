@@ -162,13 +162,16 @@ namespace VertexFormat {
         T_UINT glintTexture;
         T_FLOAT albedoEmission;
 
+        T_IVEC2 lightUV;
         T_UINT packedData;
         T_UINT pad0;
-        T_UINT pad1;
-        T_UINT pad2;
     };
 #ifdef __cplusplus
 }; // namespace VertexFormat
+
+static_assert(sizeof(VertexFormat::MaterialVertex) == 80);
+static_assert(offsetof(VertexFormat::MaterialVertex, lightUV) == 64);
+static_assert(offsetof(VertexFormat::MaterialVertex, packedData) == 72);
 #endif
 
 #ifdef __cplusplus
@@ -194,35 +197,6 @@ namespace Data {
         DirectionalLight directionalLight; // 32 bytes
         T_FLOAT time;                      // 4 bytes
         T_UINT seed;                       // 4 bytes
-    };
-
-    struct OverlayUBO {
-        T_UINT texIndices[12];
-
-        T_MAT4 modelViewMat;
-
-        T_MAT4 projectionMat;
-
-        T_VEC4 colorModulator;
-
-        T_FLOAT glintAlpha;
-        T_FLOAT fogStart;
-        T_FLOAT fogEnd;
-        T_UINT fogShape;
-
-        T_VEC4 fogColor;
-
-        T_MAT4 textureMat;
-
-        T_FLOAT gameTime;
-        T_FLOAT lineWidth;
-        T_VEC2 screenSize;
-
-        T_VEC3 light0Direction;
-        T_FLOAT pad0;
-
-        T_VEC3 light1Direction;
-        T_FLOAT pad1;
     };
 
     struct OverlayPostUBO {
@@ -262,15 +236,17 @@ namespace Data {
 
         T_UINT fogType;
         T_UINT skyType;
-        T_UINT rayBounces;
-        T_FLOAT pad3;
+        T_UINT pad2;
+        T_UINT pad3;
 
         T_DVEC4 cameraPos; // w for padding
+        T_IVEC4 chunkGridInfo; // x=sizeX, y=sizeY, z=sizeZ, w=bottomSectionCoord
+        T_IVEC4 chunkStorageSectionPos; // xyz=BuiltChunkStorage.sectionPos
 
         T_UINT endSkyTextureID;
         T_UINT endPortalTextureID;
+        T_UINT lightMapTextureID;
         T_UINT pad4;
-        T_UINT pad5;
     };
 
     struct SkyUBO {
@@ -286,30 +262,11 @@ namespace Data {
         T_UINT hasBlindnessOrDarkness;
         T_UINT cameraSubmersionType;
         T_UINT moonPhase;
-
         T_FLOAT rainGradient;
-        T_FLOAT pad0;
-        T_FLOAT pad1;
-        T_FLOAT pad2;
 
-        // AtmosphereParams
-
-        T_FLOAT Rg;
-        T_FLOAT Rt;
-        T_FLOAT Hr;
-        T_FLOAT Hm;
-
-        T_VEC3 betaR;
-        T_FLOAT mieG;
-
-        T_VEC3 betaM;
-        T_FLOAT minViewCos;
-
-        T_VEC3 sunRadiance;
         T_UINT sunTextureID;
-
-        T_VEC3 moonRadiance;
         T_UINT moonTextureID;
+        T_UINT pad0;
     };
 
     struct TextureMapEntry {

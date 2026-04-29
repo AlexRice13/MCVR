@@ -18,9 +18,33 @@ std::ostream &imageCerr() {
     return std::cerr << "[Image] ";
 }
 
+VkImageAspectFlags vk::DeviceLocalImage::imageAspectMask(VkImageUsageFlags usage) {
+    return (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0 ? VK_IMAGE_ASPECT_DEPTH_BIT :
+                                                                        VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+VkImageSubresourceRange vk::DeviceLocalImage::makeImageSubresourceRange(VkImageAspectFlags aspectMask,
+                                                                        uint32_t mipLevels,
+                                                                        uint32_t depth,
+                                                                        uint32_t layer) {
+    return {
+        .aspectMask = aspectMask,
+        .baseMipLevel = 0,
+        .levelCount = mipLevels,
+        .baseArrayLayer = 0,
+        .layerCount = depth > 1 ? 1u : layer,
+    };
+}
+
+size_t
+vk::DeviceLocalImage::imageByteSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t layer, VkFormat format) {
+    return static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(depth) *
+           static_cast<size_t>(layer) * vk::formatToByte(format);
+}
+
 vk::SwapchainImage::SwapchainImage(
     std::shared_ptr<Device> device, VkImage image, uint32_t width, uint32_t height, VkFormat format)
-    : device_(device), image_(image), width_(width), height_(height), format_(format) {
+    : device_(device), width_(width), height_(height), layer_(1), format_(format), image_(image) {
     VkImageViewCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.image = image_;
@@ -48,6 +72,10 @@ uint32_t vk::SwapchainImage::width() {
 
 uint32_t vk::SwapchainImage::height() {
     return height_;
+}
+
+uint32_t vk::SwapchainImage::depth() {
+    return 1;
 }
 
 uint32_t vk::SwapchainImage::layer() {
@@ -152,9 +180,38 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        )
     : vk::DeviceLocalImage(device,
                            vma,
+                           width,
+                           height,
+                           1,
+                           layer,
+                           format,
+                           usage
+#ifdef DEBUG
+                           ,
+                           debugName
+#endif
+      ) {
+}
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t depth,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
+    : vk::DeviceLocalImage(device,
+                           vma,
                            true,
                            width,
                            height,
+                           depth,
                            layer,
                            format,
                            usage
@@ -183,6 +240,38 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                            persistStaging,
                            width,
                            height,
+                           1,
+                           layer,
+                           format,
+                           usage
+#ifdef DEBUG
+                           ,
+                           debugName
+#endif
+      ) {
+}
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       bool persistStaging,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t depth,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
+    : vk::DeviceLocalImage(device,
+                           vma,
+                           persistStaging,
+                           1,
+                           width,
+                           height,
+                           depth,
                            layer,
                            format,
                            usage,
@@ -249,10 +338,50 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        std::string debugName
 #endif
                                        )
+    : DeviceLocalImage(device,
+                       vma,
+                       persistStaging,
+                       mipLevels,
+                       width,
+                       height,
+                       1,
+                       layer,
+                       format,
+                       usage,
+                       allocationFlags,
+                       vmaUsage,
+                       imageCreateFlags
+#ifdef DEBUG
+                       ,
+                       debugName
+#endif
+      ) {
+}
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       bool persistStaging,
+                                       uint32_t mipLevels,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t depth,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage,
+                                       VmaAllocationCreateFlags allocationFlags,
+                                       VmaMemoryUsage vmaUsage,
+                                       VkImageCreateFlags imageCreateFlags
+#ifdef DEBUG
+                                       ,
+                                       std::string debugName
+#endif
+                                       )
     : device_(device),
       vma_(vma),
+      mipLevels_(mipLevels),
       width_(width),
       height_(height),
+      depth_(depth),
       layer_(layer),
       format_(format),
       persistStaging_(persistStaging),
@@ -264,8 +393,22 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
       debugName(debugName)
 #endif
 {
+    if (depth_ == 0) {
+        imageCerr() << "image depth must be at least 1" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    if (depth_ > 1 && layer_ != 1) {
+        imageCerr() << "3d images do not support array layers in DeviceLocalImage" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    if (depth_ > 1 && (imageCreateFlags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0) {
+        imageCerr() << "3d images cannot be cube compatible" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
 #ifdef DEBUG
-    imageCout() << "Creating image with width: " << width << " height: " << height << " layer: " << layer
+    imageCout() << "Creating image with width: " << width << " height: " << height << " depth: " << depth
+                << " layer: " << layer
                 << " channel: " << vk::formatToByte(format) << " mip level: " << mipLevels
                 << " staging: " << (persistStaging ? "enabled" : "disabled") << std::endl;
 #endif
@@ -274,7 +417,7 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
         // staging buffer
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = width_ * height_ * layer_ * vk::formatToByte(format);
+        bufferInfo.size = imageByteSize(width_, height_, depth_, layer_, format_);
         bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
         VmaAllocationCreateInfo allocationInfo{};
@@ -294,9 +437,9 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.flags = imageCreateFlags;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.imageType = depth_ > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     imageInfo.format = format_;
-    imageInfo.extent = {width_, height_, 1};
+    imageInfo.extent = {width_, height_, depth_};
     imageInfo.mipLevels = mipLevels;
     imageInfo.arrayLayers = layer_;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | usage_;
@@ -314,19 +457,19 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
     }
 
     VkImageViewCreateInfo createInfo = {};
+    auto makeDefaultImageViewType = [](uint32_t depth, uint32_t layer) {
+        if (depth > 1) { return VK_IMAGE_VIEW_TYPE_3D; }
+        return layer == 1 ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    };
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.image = image_;
-    createInfo.viewType = layer_ == 1 ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    createInfo.viewType = makeDefaultImageViewType(depth_, layer_);
     createInfo.format = format_;
     createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
     createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
     createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
     createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-    if (usage_ == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-        createInfo.subresourceRange = wholeDepthSubresourceRange;
-    } else {
-        createInfo.subresourceRange = wholeColorSubresourceRange;
-    }
+    createInfo.subresourceRange = makeImageSubresourceRange(imageAspectMask(usage_), mipLevels_, depth_, layer_);
 
     if (vkCreateImageView(device_->vkDevice(), &createInfo, nullptr, &imageViews_[0]) != VK_SUCCESS) {
         imageCerr() << "failed to create image view for image" << std::endl;
@@ -357,7 +500,7 @@ void vk::DeviceLocalImage::uploadToStagingBuffer(void *src) {
 
         // staging buffer
         VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bufferInfo.size = width_ * height_ * layer_ * vk::formatToByte(format_);
+        bufferInfo.size = imageByteSize(width_, height_, depth_, layer_, format_);
         bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
         VmaAllocationCreateInfo allocationInfo{};
@@ -373,7 +516,7 @@ void vk::DeviceLocalImage::uploadToStagingBuffer(void *src) {
         mappedPtr_ = stagingAllocationInfo_.pMappedData;
     }
 
-    size_t size = width_ * height_ * layer_ * vk::formatToByte(format_);
+    size_t size = imageByteSize(width_, height_, depth_, layer_, format_);
 #ifdef DEBUG
     imageCout() << "Flushed " << size << " bytes into staging buffer" << std::endl;
 #endif
@@ -393,8 +536,8 @@ void vk::DeviceLocalImage::uploadToImage(VkCommandBuffer cmdBuffer) {
     region.imageSubresource = {usage_ == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT ?
                                    static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_DEPTH_BIT) :
                                    static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_COLOR_BIT),
-                               0, 0, layer_};
-    region.imageExtent = {width_, height_, 1};
+                               0, 0, depth_ > 1 ? 1u : layer_};
+    region.imageExtent = {width_, height_, depth_};
     vkCmdCopyBufferToImage(cmdBuffer, stagingBuffer_, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
 
@@ -423,6 +566,10 @@ uint32_t vk::DeviceLocalImage::height() {
     return height_;
 }
 
+uint32_t vk::DeviceLocalImage::depth() {
+    return depth_;
+}
+
 uint32_t vk::DeviceLocalImage::layer() {
     return layer_;
 }
@@ -449,6 +596,10 @@ VkImageLayout &vk::DeviceLocalImage::imageLayout() {
 
 void *vk::DeviceLocalImage::mappedPtr() {
     return mappedPtr_;
+}
+
+VkImageSubresourceRange vk::DeviceLocalImage::fullSubresourceRange() const {
+    return makeImageSubresourceRange(imageAspectMask(usage_), mipLevels_, depth_, layer_);
 }
 
 void vk::DeviceLocalImage::addImageView(VkImageViewCreateInfo info) {
@@ -537,7 +688,7 @@ uint8_t linearToSrgb(uint8_t linear) {
     }
 }
 
-vk::ImageLoader::ImageLoader(std::vector<std::string> imagePaths, uint32_t forceChannel)
+vk::ImageLoader::ImageLoader(std::vector<std::string> imagePaths, uint32_t forceChannel, bool convertLinearToSrgb)
     : imagePaths_(imagePaths), channel_(forceChannel), layer_(imagePaths.size()), data_() {
     if (imagePaths.size() == 0) { imageLoaderCerr() << "Cannot load 0 image" << std::endl; }
 
@@ -546,8 +697,10 @@ vk::ImageLoader::ImageLoader(std::vector<std::string> imagePaths, uint32_t force
         int channel;
         if (i == 0) {
             imageData = stbi_load(imagePaths_[i].c_str(), &width_, &height_, &channel, 0);
+#ifdef DEBUG
             imageLoaderCout() << "Loaded image from " << imagePaths_[i] << " with width: " << width_
                               << " height: " << height_ << " channel: " << channel << std::endl;
+#endif
         } else {
             int currentWidth, currentHeight;
             imageData = stbi_load(imagePaths_[i].c_str(), &currentWidth, &currentHeight, &channel, 0);
@@ -558,8 +711,10 @@ vk::ImageLoader::ImageLoader(std::vector<std::string> imagePaths, uint32_t force
                 imageLoaderCerr() << "existing: [width=" << width_ << ", height=" << height_ << "]" << std::endl;
                 exit(EXIT_FAILURE);
             }
+#ifdef DEBUG
             imageLoaderCout() << "Loaded image from " << imagePaths_[i] << " with width: " << currentWidth
                               << " height: " << currentHeight << " channel: " << channel << std::endl;
+#endif
         }
 
         if (forceChannel < channel) {
@@ -567,21 +722,25 @@ vk::ImageLoader::ImageLoader(std::vector<std::string> imagePaths, uint32_t force
             exit(EXIT_FAILURE);
         }
 
-        for (int w = 0; w < width_; w++) {
-            for (int h = 0; h < height_; h++) {
+        for (int h = 0; h < height_; h++) {
+            for (int w = 0; w < width_; w++) {
+                const int srcIndex = (h * width_ + w) * channel;
                 for (int c = 0; c < std::min(channel, 3);
                      c++) { // only do linear to srgb transform for color, not alpha
-                    data_.push_back(linearToSrgb(imageData[(w * height_ + h) * channel + c]));
+                    uint8_t value = imageData[srcIndex + c];
+                    data_.push_back(convertLinearToSrgb ? linearToSrgb(value) : value);
                 }
 
                 if (channel == 3 && forceChannel == 4) {
                     data_.push_back(255);
                 } else if (channel == 1 && forceChannel == 4) {
-                    data_.push_back(linearToSrgb(imageData[(w * height_ + h) * channel + 0]));
-                    data_.push_back(linearToSrgb(imageData[(w * height_ + h) * channel + 0]));
+                    uint8_t value = imageData[srcIndex];
+                    value = convertLinearToSrgb ? linearToSrgb(value) : value;
+                    data_.push_back(value);
+                    data_.push_back(value);
                     data_.push_back(255);
                 } else if (channel == 4 && forceChannel == 4) {
-                    data_.push_back(imageData[(w * height_ + h) * channel + 3]);
+                    data_.push_back(imageData[srcIndex + 3]);
                 } else {
                     imageLoaderCerr() << "Force channel of " << forceChannel << " is not support for channel "
                                       << channel << std::endl;

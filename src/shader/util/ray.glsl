@@ -3,6 +3,14 @@
 
 #include "util/ray_payloads.glsl"
 
+#if defined(VPT_MATERIAL_STATE_BINDING)
+layout(set = 5, binding = VPT_MATERIAL_STATE_BINDING, rgba16f) uniform image2DArray rayMaterialStateImage;
+#elif defined(ADV_MATERIAL_STATE_BINDING)
+layout(set = 5, binding = ADV_MATERIAL_STATE_BINDING, rgba16f) uniform image2DArray rayMaterialStateImage;
+#else
+layout(set = 5, binding = 7, rgba16f) uniform image2DArray rayMaterialStateImage;
+#endif
+
 const uint rayBounceMask = 0xFFu;
 const uint rayInsideBoatBit = 1u << 8u;
 const uint rayStopBit = 1u << 9u;
@@ -11,6 +19,15 @@ const uint rayNoisyBit = 1u << 11u;
 const uint rayLobeShift = 12u;
 const uint rayLobeMask = 0x3u << rayLobeShift;
 const uint raySkipFogBit = 1u << 14u;
+const uint rayIgnoreWaterSelfBit = 1u << 15u;
+const uint rayCaptureSurfaceBit = 1u << 16u;
+const uint raySurfaceCacheWrittenBit = 1u << 17u;
+const uint raySurfaceCacheTargetSecondaryBit = 1u << 18u;
+const uint rayIndirectVolumetricCloudBit = 1u << 19u;
+
+ivec3 rayMaterialStateCoord(int layer) {
+    return ivec3(ivec2(gl_LaunchIDEXT.xy), layer);
+}
 
 void raySetBounce(inout MainRay ray, uint bounce) {
     ray.stateBits = (ray.stateBits & ~rayBounceMask) | (bounce & rayBounceMask);
@@ -60,6 +77,49 @@ bool raySkipFog(MainRay ray) {
     return (ray.stateBits & raySkipFogBit) != 0u;
 }
 
+void raySetIgnoreWaterSelf(inout MainRay ray, bool enabled) {
+    ray.stateBits = enabled ? (ray.stateBits | rayIgnoreWaterSelfBit) : (ray.stateBits & ~rayIgnoreWaterSelfBit);
+}
+
+bool rayIgnoreWaterSelf(MainRay ray) {
+    return (ray.stateBits & rayIgnoreWaterSelfBit) != 0u;
+}
+
+void raySetCaptureSurface(inout MainRay ray, bool enabled) {
+    ray.stateBits = enabled ? (ray.stateBits | rayCaptureSurfaceBit) : (ray.stateBits & ~rayCaptureSurfaceBit);
+}
+
+bool rayCaptureSurface(MainRay ray) {
+    return (ray.stateBits & rayCaptureSurfaceBit) != 0u;
+}
+
+void raySetSurfaceCacheWritten(inout MainRay ray, bool enabled) {
+    ray.stateBits = enabled ? (ray.stateBits | raySurfaceCacheWrittenBit) :
+                              (ray.stateBits & ~raySurfaceCacheWrittenBit);
+}
+
+bool raySurfaceCacheWritten(MainRay ray) {
+    return (ray.stateBits & raySurfaceCacheWrittenBit) != 0u;
+}
+
+void raySetSurfaceCacheTargetSecondary(inout MainRay ray, bool enabled) {
+    ray.stateBits = enabled ? (ray.stateBits | raySurfaceCacheTargetSecondaryBit) :
+                              (ray.stateBits & ~raySurfaceCacheTargetSecondaryBit);
+}
+
+bool raySurfaceCacheTargetSecondary(MainRay ray) {
+    return (ray.stateBits & raySurfaceCacheTargetSecondaryBit) != 0u;
+}
+
+void raySetIndirectVolumetricCloud(inout MainRay ray, bool enabled) {
+    ray.stateBits = enabled ? (ray.stateBits | rayIndirectVolumetricCloudBit) :
+                              (ray.stateBits & ~rayIndirectVolumetricCloudBit);
+}
+
+bool rayUseIndirectVolumetricCloud(MainRay ray) {
+    return (ray.stateBits & rayIndirectVolumetricCloudBit) != 0u;
+}
+
 void raySetLobeType(inout MainRay ray, uint lobeType) {
     ray.stateBits = (ray.stateBits & ~rayLobeMask) | ((lobeType & 0x3u) << rayLobeShift);
 }
@@ -69,12 +129,9 @@ uint rayLobeType(MainRay ray) {
 }
 
 void rayClearMaterial(inout MainRay ray) {
-    ray.materialPacked0 = 0u;
-    ray.materialPacked1 = 0u;
-    ray.materialPacked2 = 0u;
-    ray.materialPacked3 = 0u;
-    ray.materialPacked4 = 0u;
-    ray.materialPacked5 = 0u;
+    imageStore(rayMaterialStateImage, rayMaterialStateCoord(0), vec4(0.0));
+    imageStore(rayMaterialStateImage, rayMaterialStateCoord(1), vec4(0.0));
+    imageStore(rayMaterialStateImage, rayMaterialStateCoord(2), vec4(0.0));
 }
 
 void rayStoreMaterial(inout MainRay ray,
@@ -85,30 +142,33 @@ void rayStoreMaterial(inout MainRay ray,
                        float transmission,
                        float ior,
                        float emission) {
-    ray.materialPacked0 = packHalf2x16(albedoValue.rg);
-    ray.materialPacked1 = packHalf2x16(vec2(albedoValue.b, albedoValue.a));
-    ray.materialPacked2 = packHalf2x16(f0.rg);
-    ray.materialPacked3 = packHalf2x16(vec2(f0.b, roughness));
-    ray.materialPacked4 = packHalf2x16(vec2(metallic, transmission));
-    ray.materialPacked5 = packHalf2x16(vec2(ior, emission));
+    imageStore(rayMaterialStateImage, rayMaterialStateCoord(0), albedoValue);
+    imageStore(rayMaterialStateImage, rayMaterialStateCoord(1), vec4(f0, roughness));
+    imageStore(rayMaterialStateImage, rayMaterialStateCoord(2), vec4(metallic, transmission, ior, emission));
+}
+
+void rayStoreAux(inout MainRay ray, vec2 aux) {
+    ray.pad0 = packHalf2x16(aux);
+}
+
+vec2 rayLoadAux(MainRay ray) {
+    return unpackHalf2x16(ray.pad0);
 }
 
 MaterialInfo rayLoadMaterial(MainRay ray) {
     MaterialInfo mat;
-    vec2 albedoRG = unpackHalf2x16(ray.materialPacked0);
-    vec2 albedoBA = unpackHalf2x16(ray.materialPacked1);
-    vec2 f0RG = unpackHalf2x16(ray.materialPacked2);
-    vec2 f0BRoughness = unpackHalf2x16(ray.materialPacked3);
-    vec2 material01 = unpackHalf2x16(ray.materialPacked4);
-    vec2 material23 = unpackHalf2x16(ray.materialPacked5);
+    memoryBarrierImage();
+    vec4 albedoValue = imageLoad(rayMaterialStateImage, rayMaterialStateCoord(0));
+    vec4 f0Roughness = imageLoad(rayMaterialStateImage, rayMaterialStateCoord(1));
+    vec4 materialValues = imageLoad(rayMaterialStateImage, rayMaterialStateCoord(2));
 
-    mat.albedoValue = vec4(albedoRG.x, albedoRG.y, albedoBA.x, albedoBA.y);
-    mat.f0 = vec3(f0RG.x, f0RG.y, f0BRoughness.x);
-    mat.roughness = f0BRoughness.y;
-    mat.metallic = material01.x;
-    mat.transmission = material01.y;
-    mat.ior = material23.x;
-    mat.emission = material23.y;
+    mat.albedoValue = albedoValue;
+    mat.f0 = f0Roughness.rgb;
+    mat.roughness = f0Roughness.a;
+    mat.metallic = materialValues.x;
+    mat.transmission = materialValues.y;
+    mat.ior = materialValues.z;
+    mat.emission = materialValues.w;
     return mat;
 }
 

@@ -64,6 +64,83 @@ vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionCol
 }
 
 template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorTexLightNormal>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionColorTexLightNormal, position)},
+        {VK_FORMAT_R8G8B8A8_UNORM, offsetof(VertexFormat::PositionColorTexLightNormal, color)},
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PositionColorTexLightNormal, uv0)},
+        {VK_FORMAT_R16G16_SINT, offsetof(VertexFormat::PositionColorTexLightNormal, uv2)},
+        {VK_FORMAT_R8G8B8A8_SNORM, offsetof(VertexFormat::PositionColorTexLightNormal, normal)},
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo =
+        initVertexLayout<vk::VertexFormat::PositionColorTexLightNormal>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexColorLight>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionTexColorLight, position)},
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PositionTexColorLight, uv0)},
+        {VK_FORMAT_R8G8B8A8_UNORM, offsetof(VertexFormat::PositionTexColorLight, color)},
+        {VK_FORMAT_R16G16_SINT, offsetof(VertexFormat::PositionTexColorLight, uv2)},
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo =
+        initVertexLayout<vk::VertexFormat::PositionTexColorLight>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorNormal>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionColorNormal, position)},
+        {VK_FORMAT_R8G8B8A8_UNORM, offsetof(VertexFormat::PositionColorNormal, color)},
+        {VK_FORMAT_R8G8B8A8_SNORM, offsetof(VertexFormat::PositionColorNormal, normal)},
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo =
+        initVertexLayout<vk::VertexFormat::PositionColorNormal>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionColorLight>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionColorLight, position)},
+        {VK_FORMAT_R8G8B8A8_UNORM, offsetof(VertexFormat::PositionColorLight, color)},
+        {VK_FORMAT_R16G16_SINT, offsetof(VertexFormat::PositionColorLight, uv2)},
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo =
+        initVertexLayout<vk::VertexFormat::PositionColorLight>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexLightColor>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionTexLightColor, position)},
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PositionTexLightColor, uv0)},
+        {VK_FORMAT_R16G16_SINT, offsetof(VertexFormat::PositionTexLightColor, uv2)},
+        {VK_FORMAT_R8G8B8A8_UNORM, offsetof(VertexFormat::PositionTexLightColor, color)},
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo =
+        initVertexLayout<vk::VertexFormat::PositionTexLightColor>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionTexColorNormal>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionTexColorNormal, position)},
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PositionTexColorNormal, uv0)},
+        {VK_FORMAT_R8G8B8A8_UNORM, offsetof(VertexFormat::PositionTexColorNormal, color)},
+        {VK_FORMAT_R8G8B8A8_SNORM, offsetof(VertexFormat::PositionTexColorNormal, normal)},
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo =
+        initVertexLayout<vk::VertexFormat::PositionTexColorNormal>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
 vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionOnly>() {
     static std::vector<VertexAttribute> attributes = {
         {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PositionOnly, position)},

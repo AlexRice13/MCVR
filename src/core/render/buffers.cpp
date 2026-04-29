@@ -2,12 +2,15 @@
 #include "core/render/buffers.hpp"
 
 #include "common/shared.hpp"
+#include "core/render/chunks.hpp"
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/world.hpp"
 
+#include <algorithm>
+#include <cstring>
 #include <random>
 
 std::ostream &buffersCout() {
@@ -20,38 +23,83 @@ std::ostream &buffersCerr() {
 
 Buffers::Buffers(std::shared_ptr<Framework> framework) {
     uint32_t size = framework->swapchain()->imageCount();
+    auto device = framework->device();
+    auto vma = framework->vma();
+    auto alignTo = [](uint32_t value, uint32_t alignment) {
+        if (alignment <= 1 || value == 0) return value;
+        return ((value + alignment - 1) / alignment) * alignment;
+    };
+    overlayDrawUniformAlignment_ =
+        std::max<uint32_t>(1, framework->physicalDevice()->properties().limits.minUniformBufferOffsetAlignment);
+    overlayDrawUniformDeviceLimit_ =
+        std::max<uint32_t>(1, framework->physicalDevice()->properties().limits.maxUniformBufferRange);
+    overlayDrawUniformDescriptorRange_ =
+        std::min<uint32_t>(overlayDrawUniformDeviceLimit_, overlayDrawUniformInitialDescriptorRange);
+    overlayPostUniformDescriptorRange_ = sizeof(vk::Data::OverlayPostUBO);
+    overlayPostUniformStride_ = alignTo(overlayPostUniformDescriptorRange_, overlayDrawUniformAlignment_);
 
     validOverlayIndex_.resize(size);
     overlayIndexVertexBuffer_.resize(size);
 
     overlayDrawUniformBuffer_.resize(size);
     overlayPostUniformBuffer_.resize(size);
+    overlayDrawUniformData_.resize(size);
+    overlayDrawUniformWriteOffset_.resize(size, 0);
+    overlayPostUniformData_.resize(size);
+    overlayPostUniformCount_.resize(size, 0);
 
     worldUniformBuffer_.resize(size);
     lastWorldUniformBuffer_.resize(size);
     skyUniformBuffer_.resize(size);
     textureMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
-    lightMapUniformBuffer_.resize(size);
+
+    for (uint32_t i = 0; i < size; i++) {
+        overlayDrawUniformBuffer_[i] = vk::HostVisibleBuffer::create(
+            vma, device, std::max<uint32_t>(overlayDrawUniformInitialSize, overlayDrawUniformAlignment_),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        overlayDrawUniformData_[i].reserve(overlayDrawUniformBuffer_[i]->size());
+        overlayPostUniformBuffer_[i] = vk::HostVisibleBuffer::create(
+            vma, device, std::max<uint32_t>(overlayPostUniformInitialSize, overlayPostUniformStride_),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        overlayPostUniformData_[i].reserve(overlayPostUniformBuffer_[i]->size());
+    }
+}
+
+bool Buffers::ensureOverlayDrawUniformBufferCapacityLocked(std::shared_ptr<Framework> framework,
+                                                           uint32_t frameIndex,
+                                                           uint32_t requiredBufferSize) {
+    auto &buffer = overlayDrawUniformBuffer_[frameIndex];
+    if (requiredBufferSize <= buffer->size()) { return false; }
+
+    uint32_t newSize = std::max<uint32_t>(buffer->size(), overlayDrawUniformInitialSize);
+    while (newSize < requiredBufferSize) { newSize *= 2; }
+
+    auto newBuffer =
+        vk::HostVisibleBuffer::create(framework->vma(), framework->device(), newSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    framework->frameResourceRetainer().retain(buffer);
+    overlayDrawUniformBuffer_[frameIndex] = newBuffer;
+    overlayDrawUniformData_[frameIndex].reserve(newSize);
+    return true;
 }
 
 void Buffers::resetFrame() {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
-    auto &gc = framework->gc();
+    auto &frr = framework->frameResourceRetainer();
 
     validOverlayIndex_[context->frameIndex].clear();
 
     overlayNextID_ = 0;
 
-    gc.collect(overlayDrawUniformQueue_);
-    overlayDrawUniformQueue_ = std::make_shared<std::vector<vk::Data::OverlayUBO>>();
-
-    gc.collect(overlayPostUniformQueue_);
-    overlayPostUniformQueue_ = std::make_shared<std::vector<vk::Data::OverlayPostUBO>>();
-
-    gc.collect(importantIndexVertexBuffer_);
+    frr.retain(importantIndexVertexBuffer_);
     importantIndexVertexBuffer_ = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>();
+
+    overlayDrawUniformData_[context->frameIndex].clear();
+    overlayDrawUniformWriteOffset_[context->frameIndex] = 0;
+    overlayPostUniformData_[context->frameIndex].clear();
+    overlayPostUniformCount_[context->frameIndex] = 0;
 }
 
 uint32_t Buffers::allocateBuffer() {
@@ -90,7 +138,7 @@ void Buffers::initializeBuffer(uint32_t id, uint32_t size, VkBufferUsageFlags us
     uint32_t currentSize = buffer == nullptr ? baseBlockSize : buffer->size();
     while (currentSize < size) currentSize *= 2;
     if (buffer == nullptr || currentSize != buffer->size()) {
-        framework->gc().collect(buffer);
+        framework->frameResourceRetainer().retain(buffer);
         overlayIndexVertexBuffer_[context->frameIndex].at(id) =
             vk::DeviceLocalBuffer::create(vma, device, currentSize, usageFlags);
     }
@@ -156,11 +204,13 @@ void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> v
 }
 
 void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> buffer) {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
     if (buffer == nullptr) return;
     importantIndexVertexBuffer_->push_back(buffer);
 }
 
 void Buffers::performQueuedUpload() {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
     auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
     std::shared_ptr<vk::CommandBuffer> cmdBuffer =
         Renderer::instance().framework()->safeAcquireCurrentContext()->uploadCommandBuffer;
@@ -229,61 +279,113 @@ void Buffers::performQueuedUpload() {
     cmdBuffer->barriersBufferImage(uploadPostBufferBarriers, {});
 }
 
-void Buffers::appendOverlayDrawUniform(vk::Data::OverlayUBO &ubo) {
+void Buffers::appendOverlayDrawUniform(uint8_t *srcPointer, uint32_t size, uint32_t &uniformOffset) {
     std::unique_lock<std::recursive_mutex> lck(mtx_);
-    auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto frameIndex = context->frameIndex;
+    auto alignTo = [](uint32_t value, uint32_t alignment) {
+        if (alignment <= 1 || value == 0) return value;
+        return ((value + alignment - 1) / alignment) * alignment;
+    };
 
-    glm::mat4 mapGLToVulkan(1.0f);
-    mapGLToVulkan[1][1] = -1.0f;
-    mapGLToVulkan[2][2] = 0.5f;
-    mapGLToVulkan[3][2] = 0.5f;
+    uniformOffset = overlayDrawUniformWriteOffset_[frameIndex];
+    uint32_t alignedSize = alignTo(size, overlayDrawUniformAlignment_);
+    if (size > overlayDrawUniformDescriptorRange_) {
+        throw std::runtime_error("Overlay draw uniform exceeds fixed descriptor range");
+    }
 
-    ubo.projectionMat = mapGLToVulkan * ubo.projectionMat;
+    uint32_t requiredSize = uniformOffset + size;
+    auto &cpuData = overlayDrawUniformData_[frameIndex];
+    if (cpuData.size() < requiredSize) { cpuData.resize(requiredSize, 0); }
 
-    overlayDrawUniformQueue_->push_back(ubo);
+    if (size > 0) { std::memcpy(cpuData.data() + uniformOffset, srcPointer, size); }
+
+    overlayDrawUniformWriteOffset_[frameIndex] = uniformOffset + alignedSize;
+
+    if (ensureOverlayDrawUniformBufferCapacityLocked(framework, frameIndex,
+                                                     uniformOffset + overlayDrawUniformDescriptorRange_)) {
+        auto pipelineContext = framework->pipeline()->acquirePipelineContext(context);
+        pipelineContext->uiModuleContext->refreshOverlayDescriptorTable();
+    }
+}
+
+bool Buffers::registerOverlayDrawUniformSize(uint32_t size) {
+    auto framework = Renderer::instance().framework();
+    if (framework == nullptr) return false;
+
+    {
+        std::unique_lock<std::recursive_mutex> lck(mtx_);
+        uint32_t requiredRange = std::max<uint32_t>(1, size);
+        if (requiredRange > overlayDrawUniformDeviceLimit_) {
+            throw std::runtime_error("Overlay draw uniform exceeds device maxUniformBufferRange");
+        }
+
+        if (requiredRange <= overlayDrawUniformDescriptorRange_) { return false; }
+
+        overlayDrawUniformDescriptorRange_ = requiredRange;
+        for (uint32_t frameIndex = 0; frameIndex < overlayDrawUniformBuffer_.size(); ++frameIndex) {
+            ensureOverlayDrawUniformBufferCapacityLocked(framework, frameIndex, requiredRange);
+        }
+    }
+
+    return true;
 }
 
 void Buffers::appendOverlayPostUniform(vk::Data::OverlayPostUBO &ubo) {
     std::unique_lock<std::recursive_mutex> lck(mtx_);
-    auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
-    overlayPostUniformQueue_->push_back(ubo);
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto frameIndex = context->frameIndex;
+
+    uint32_t uniformOffset = overlayPostUniformCount_[frameIndex] * overlayPostUniformStride_;
+    uint32_t requiredSize = uniformOffset + overlayPostUniformDescriptorRange_;
+    auto &cpuData = overlayPostUniformData_[frameIndex];
+    if (cpuData.size() < requiredSize) { cpuData.resize(requiredSize, 0); }
+
+    std::memcpy(cpuData.data() + uniformOffset, &ubo, sizeof(vk::Data::OverlayPostUBO));
+
+    auto &buffer = overlayPostUniformBuffer_[frameIndex];
+    if (uniformOffset + overlayPostUniformDescriptorRange_ > buffer->size()) {
+        uint32_t requiredBufferSize = uniformOffset + overlayPostUniformDescriptorRange_;
+        uint32_t newSize = std::max<uint32_t>(buffer->size(), overlayPostUniformInitialSize);
+        while (newSize < requiredBufferSize) { newSize *= 2; }
+
+        auto newBuffer =
+            vk::HostVisibleBuffer::create(framework->vma(), framework->device(), newSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        framework->frameResourceRetainer().retain(buffer);
+        overlayPostUniformBuffer_[frameIndex] = newBuffer;
+        cpuData.reserve(newSize);
+
+        auto pipelineContext = framework->pipeline()->acquirePipelineContext(context);
+        pipelineContext->uiModuleContext->refreshOverlayDescriptorTable();
+    }
+
+    overlayPostUniformCount_[frameIndex]++;
 }
 
 void Buffers::buildAndUploadOverlayUniformBuffer() {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
-    auto vma = framework->vma();
-    auto device = framework->device();
-    auto pipelineContext =
-        Renderer::instance().framework()->pipeline()->acquirePipelineContext(framework->safeAcquireCurrentContext());
+    auto frameIndex = context->frameIndex;
 
-    auto &drawBuffer = overlayDrawUniformBuffer_[context->frameIndex];
-    uint32_t drawRequiredSize = overlayDrawUniformQueue_->size() * sizeof(vk::Data::OverlayUBO);
-    if (drawBuffer == nullptr || drawBuffer->size() < drawRequiredSize) {
-        uint32_t currentSize = drawBuffer == nullptr ? baseBlockSize : drawBuffer->size();
-        while (currentSize < drawRequiredSize) currentSize *= 2;
-        framework->gc().collect(drawBuffer);
-        drawBuffer = vk::HostVisibleBuffer::create(
-            vma, device, currentSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    auto &drawCpuData = overlayDrawUniformData_[frameIndex];
+    auto &drawBuffer = overlayDrawUniformBuffer_[frameIndex];
+    if (!drawCpuData.empty()) {
+        if (drawCpuData.size() > drawBuffer->size()) {
+            throw std::runtime_error("Overlay draw uniform buffer exhausted before upload");
+        }
+        drawBuffer->uploadToBuffer(drawCpuData.data(), drawCpuData.size(), 0);
     }
-    if (overlayDrawUniformQueue_->size() > 0) {
-        drawBuffer->uploadToBuffer(overlayDrawUniformQueue_->data(), drawRequiredSize, 0);
-    }
-    pipelineContext->uiModuleContext->overlayDescriptorTable->bindBuffer(drawBuffer, 1, 0);
 
-    auto &postBuffer = overlayPostUniformBuffer_[context->frameIndex];
-    uint32_t postRequiredSize = overlayPostUniformQueue_->size() * sizeof(vk::Data::OverlayPostUBO);
-    if (postBuffer == nullptr || postBuffer->size() < postRequiredSize) {
-        uint32_t currentSize = postBuffer == nullptr ? baseBlockSize : postBuffer->size();
-        while (currentSize < postRequiredSize) currentSize *= 2;
-        framework->gc().collect(postBuffer);
-        postBuffer = vk::HostVisibleBuffer::create(
-            vma, device, currentSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    auto &postCpuData = overlayPostUniformData_[frameIndex];
+    auto &postBuffer = overlayPostUniformBuffer_[frameIndex];
+    if (!postCpuData.empty()) {
+        if (postCpuData.size() > postBuffer->size()) {
+            throw std::runtime_error("Overlay post uniform buffer exhausted before upload");
+        }
+        postBuffer->uploadToBuffer(postCpuData.data(), postCpuData.size(), 0);
     }
-    if (overlayPostUniformQueue_->size() > 0) {
-        postBuffer->uploadToBuffer(overlayPostUniformQueue_->data(), postRequiredSize, 0);
-    }
-    pipelineContext->uiModuleContext->overlayDescriptorTable->bindBuffer(postBuffer, 1, 1);
 }
 
 static size_t sequenceIndex = 0;
@@ -342,13 +444,18 @@ void Buffers::setAndUploadWorldUniformBuffer(vk::Data::WorldUBO &ubo) {
 
     ubo.cameraJitter = useJitter_ ? halton(sequenceIndex++) - glm::vec2(0.5) : glm::vec2(0.0);
 
-    ubo.rayBounces = Renderer::options.rayBounces;
-
     auto world = Renderer::instance().world();
     ubo.cameraPos.x = world->getCameraPos().x;
     ubo.cameraPos.y = world->getCameraPos().y;
     ubo.cameraPos.z = world->getCameraPos().z;
     ubo.cameraPos.w = 0;
+    if (auto chunks = world->chunks(); chunks != nullptr) {
+        ubo.chunkGridInfo = chunks->chunkGridInfo();
+        ubo.chunkStorageSectionPos = chunks->chunkStorageSectionPos();
+    } else {
+        ubo.chunkGridInfo = glm::ivec4(0);
+        ubo.chunkStorageSectionPos = glm::ivec4(0);
+    }
 
     if (worldUniformBuffer_[context->frameIndex] == nullptr) {
         worldUniformBuffer_[context->frameIndex] =
@@ -373,17 +480,6 @@ void Buffers::setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo) {
     auto context = framework->safeAcquireCurrentContext();
     auto vma = framework->vma();
     auto device = framework->device();
-
-    ubo.Rg = 6360000.0;
-    ubo.Rt = 6460000.0;
-    ubo.Hr = 8000.0;
-    ubo.Hm = 1200.0;
-    ubo.mieG = 0.80;
-    ubo.betaR = glm::vec3(5.802e-6, 13.558e-6, 33.100e-6);
-    ubo.betaM = glm::vec3(21.000e-6, 21.000e-6, 21.000e-6);
-    ubo.minViewCos = 0.02;
-    ubo.sunRadiance = glm::vec3(16);
-    ubo.moonRadiance = glm::vec3(0.08, 0.1, 0.2);
 
     if (skyUniformBuffer_[context->frameIndex] == nullptr) {
         skyUniformBuffer_[context->frameIndex] =
@@ -426,32 +522,9 @@ void Buffers::setAndUploadExposureDataBuffer(vk::Data::ExposureData &exposureDat
     exposureDataBuffer_[context->frameIndex]->uploadToBuffer(&exposureData);
 }
 
-void Buffers::setAndUploadLightMapUniformBuffer(vk::Data::LightMapUBO &ubo) {
-    std::unique_lock<std::recursive_mutex> lck(mtx_);
-    auto framework = Renderer::instance().framework();
-    auto context = framework->safeAcquireCurrentContext();
-    auto vma = framework->vma();
-    auto device = framework->device();
-
-    if (lightMapUniformBuffer_[context->frameIndex] == nullptr) {
-        lightMapUniformBuffer_[context->frameIndex] =
-            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::LightMapUBO),
-                                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    }
-
-    lightMapUniformBuffer_[context->frameIndex]->uploadToBuffer(&ubo);
-}
-
-int Buffers::getDrawID() {
-    Renderer::instance().framework()->safeAcquireCurrentContext();
-
-    return overlayDrawUniformQueue_->size() - 1;
-}
-
 int Buffers::getPostID() {
-    Renderer::instance().framework()->safeAcquireCurrentContext();
-
-    return overlayPostUniformQueue_->size() - 1;
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+    return static_cast<int>(overlayPostUniformCount_[context->frameIndex]) - 1;
 }
 
 std::shared_ptr<vk::DeviceLocalBuffer> Buffers::getBuffer(uint32_t id) {
@@ -472,9 +545,22 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::overlayDrawUniformBuffer() {
     return overlayDrawUniformBuffer_[context->frameIndex];
 }
 
+uint32_t Buffers::overlayDrawUniformDescriptorRange() {
+    return overlayDrawUniformDescriptorRange_;
+}
+
 std::shared_ptr<vk::HostVisibleBuffer> Buffers::overlayPostUniformBuffer() {
     auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
     return overlayPostUniformBuffer_[context->frameIndex];
+}
+
+uint32_t Buffers::overlayPostUniformDescriptorRange() {
+    return overlayPostUniformDescriptorRange_;
+}
+
+uint32_t Buffers::overlayPostUniformOffset(int postID) {
+    if (postID < 0) return 0;
+    return static_cast<uint32_t>(postID) * overlayPostUniformStride_;
 }
 
 std::shared_ptr<vk::HostVisibleBuffer> Buffers::worldUniformBuffer() {
@@ -522,16 +608,6 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::exposureDataBuffer() {
 
     if (exposureDataBuffer_[context->frameIndex]) {
         return exposureDataBuffer_[context->frameIndex];
-    } else {
-        return nullptr;
-    }
-}
-
-std::shared_ptr<vk::HostVisibleBuffer> Buffers::lightMapUniformBuffer() {
-    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
-
-    if (lightMapUniformBuffer_[context->frameIndex]) {
-        return lightMapUniformBuffer_[context->frameIndex];
     } else {
         return nullptr;
     }

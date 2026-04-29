@@ -21,6 +21,8 @@ struct Vertex {
     static constexpr uint32_t useTextureBit = 1u << 1u;
     static constexpr uint32_t useOverlayBit = 1u << 2u;
     static constexpr uint32_t useGlintBit = 1u << 3u;
+    static constexpr uint32_t useNormBit = 1u << 4u;
+    static constexpr uint32_t useLightBit = 1u << 5u;
     static constexpr uint32_t alphaModeShift = 8u;
     static constexpr uint32_t coordinateShift = 12u;
 
