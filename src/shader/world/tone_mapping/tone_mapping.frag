@@ -30,14 +30,23 @@ layout(push_constant) uniform PushConstant {
     float exposureBias;
     float whitePoint;
     float saturation;
+    float contrast;
+    float gradingGamma;
+    float lift;
+    float gain;
+    float temperature;
+    float tint;
     int toneMappingMethod;
     int autoExposure;
     int clampOutput;
     int exposureMeteringMode;
     float centerMeteringPercent;
+    int hdrActive;
+    float hdrMinLuminance;
+    float hdrMaxLuminance;
+    float hdrRollOff;
     float padding0;
     float padding1;
-    float padding2;
 }
 pc;
 
@@ -124,7 +133,48 @@ vec3 applySaturation(vec3 color, float saturation) {
     return mix(vec3(luma), color, saturation);
 }
 
+vec3 applyContrast(vec3 color, float contrast) {
+    return max(((color - 0.5) * contrast) + 0.5, vec3(0.0));
+}
+
+vec3 applyHdrContrast(vec3 color, float contrast) {
+    vec3 clampedColor = clamp(color, vec3(0.0), vec3(1.0));
+    if (contrast <= 1.0) return mix(vec3(0.5), clampedColor, max(contrast, 0.0));
+
+    vec3 delta = (clampedColor - 0.5) * 2.0;
+    vec3 shaped = sign(delta) * pow(abs(delta), vec3(1.0 / max(contrast, 1e-3)));
+    return clamp(0.5 + shaped * 0.5, vec3(0.0), vec3(1.0));
+}
+
+vec3 applyLiftGain(vec3 color, float lift, float gain) {
+    return max((color + vec3(lift)) * vec3(gain), vec3(0.0));
+}
+
+vec3 applyTemperatureTint(vec3 color, float temperature, float tint) {
+    vec3 temperatureScale = vec3(1.0 + temperature * 0.15, 1.0, 1.0 - temperature * 0.15);
+    vec3 tintScale = vec3(1.0 + tint * 0.05, 1.0 - tint * 0.10, 1.0 + tint * 0.05);
+    return max(color * temperatureScale * tintScale, vec3(0.0));
+}
+
+vec3 applyCalibrationGamma(vec3 color, float gammaValue) {
+    return pow(max(color, vec3(0.0)), vec3(1.0 / max(gammaValue, 1e-6)));
+}
+
+float applyHdrReinhardRollOff(float value, float rollOff) {
+    float clampedValue = clamp(value, 0.0, 1.0);
+    float shoulder = max(rollOff, 1e-3);
+    return clamp(clampedValue / max(clampedValue + shoulder * (1.0 - clampedValue), 1e-6), 0.0, 1.0);
+}
+
+vec3 applyHdrReinhardRollOff(vec3 value, float rollOff) {
+    return vec3(applyHdrReinhardRollOff(value.r, rollOff),
+                applyHdrReinhardRollOff(value.g, rollOff),
+                applyHdrReinhardRollOff(value.b, rollOff));
+}
+
 void main() {
+    const float SDR_REFERENCE_WHITE_NITS = 80.0;
+
     vec3 hdr = texture(HDR, texCoord).rgb;
 
     float exposure = (pc.autoExposure != 0) ? expData.exposure : pc.manualExposure;
@@ -134,7 +184,25 @@ void main() {
     vec3 expColor = max(hdr * max(exposure, 0.0), vec3(0.0));
     vec3 mapped = applyToneMapping(expColor);
     mapped = max(mapped, vec3(0.0));
+    mapped = applyTemperatureTint(mapped, pc.temperature, pc.tint);
+    mapped = applyLiftGain(mapped, pc.lift, pc.gain);
+    mapped = pc.hdrActive != 0 ? applyHdrContrast(mapped, max(pc.contrast, 0.0))
+                               : applyContrast(mapped, max(pc.contrast, 0.0));
     mapped = applySaturation(mapped, max(pc.saturation, 0.0));
+
+    if (pc.hdrActive != 0) {
+        float minOutput = max(pc.hdrMinLuminance, 0.0) / SDR_REFERENCE_WHITE_NITS;
+        float maxOutput = max(pc.hdrMaxLuminance, pc.hdrMinLuminance + 1e-3) / SDR_REFERENCE_WHITE_NITS;
+
+        mapped = applyHdrReinhardRollOff(mapped, pc.hdrRollOff);
+        vec3 hdrOutput = mix(vec3(minOutput), vec3(maxOutput), clamp(mapped, vec3(0.0), vec3(1.0)));
+
+        if (pc.clampOutput != 0) hdrOutput = clamp(hdrOutput, vec3(0.0), vec3(maxOutput));
+        fragColor = vec4(hdrOutput, 1.0);
+        return;
+    }
+
+    mapped = applyCalibrationGamma(mapped, pc.gradingGamma);
     mapped = pow(mapped, vec3(1.0 / 2.2));
     if (pc.clampOutput != 0) mapped = clamp(mapped, vec3(0.0), vec3(1.0));
 

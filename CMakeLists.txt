@@ -77,7 +77,7 @@ else()
     message(STATUS "AMD Support Disabled")
 endif()
 
-set(MCVR_BUILT_IN_SHADER_PACKS vanilla-pt advanced)
+set(MCVR_BUILT_IN_SHADER_PACKS vanilla-pt advanced advance_alex)
 message(STATUS "Built-in shader packs: ${MCVR_BUILT_IN_SHADER_PACKS}")
 
 # FidelityFX Upscaler (FSR3 Upscaler only)

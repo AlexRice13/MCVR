@@ -534,6 +534,12 @@ void RayTracingModule::initDescriptorTables() {
                 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 .descriptorCount = 1,
                 .stageFlags = runtimeTextureStageFlags,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 3,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = runtimeTextureStageFlags,
             });
         set2Bindings.endDescriptorLayoutSetBinding();
         set2.endDescriptorLayoutSet();
@@ -1857,6 +1863,7 @@ void RayTracingModuleContext::render() {
     rayTracingDescriptorTable->bindBuffer(buffers->worldUniformBuffer(), 2, 0);
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
     rayTracingDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
+    rayTracingDescriptorTable->bindBuffer(buffers->cloudCoverageBuffer(), 2, 3);
 
     worldPrepareContext->render();
     if (Renderer::options.collectChunkEmission && chunks != nullptr && chunks->chunkPackedData() != nullptr) {

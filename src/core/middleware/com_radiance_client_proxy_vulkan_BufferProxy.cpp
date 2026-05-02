@@ -97,3 +97,11 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateM
     vk::Data::TextureMapping *mapping = reinterpret_cast<vk::Data::TextureMapping *>(ptr);
     buffers->setAndUploadTextureMappingBuffer(*mapping);
 }
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateCloudCoverage(
+    JNIEnv *, jclass, jlong ptr, jint width, jint height) {
+    auto buffers = Renderer::instance().buffers();
+    if (buffers == nullptr) return;
+    buffers->setAndUploadCloudCoverageBuffer(reinterpret_cast<uint8_t *>(ptr), static_cast<uint32_t>(width),
+                                             static_cast<uint32_t>(height));
+}

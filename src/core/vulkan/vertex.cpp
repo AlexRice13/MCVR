@@ -10,6 +10,7 @@ uint32_t vk::Vertex::packMaterialFlags(const VertexFormat::PBRVertex &vertex) {
     packed |= vertex.useGlint > 0 ? useGlintBit : 0u;
     packed |= vertex.useNorm > 0 ? useNormBit : 0u;
     packed |= vertex.useLight > 0 ? useLightBit : 0u;
+    packed |= vertex.alphaMode & materialFlagMask;
     packed |= (vertex.alphaMode & 0xFu) << alphaModeShift;
     packed |= (vertex.coordinate & 0xFu) << coordinateShift;
     return packed;

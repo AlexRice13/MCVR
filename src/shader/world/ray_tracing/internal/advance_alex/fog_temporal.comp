@@ -1,0 +1,244 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 3, binding = 0, rgba16f) uniform image2D hdrImage;
+layout(set = 3, binding = 13, rgba16f) uniform readonly image2D fogImage;
+layout(set = 3, binding = 4, rg16f) uniform readonly image2D motionVectorImage;
+layout(set = 3, binding = 5, r16f) uniform readonly image2D linearDepthImage;
+layout(set = 5, binding = 36, rgba16f) uniform image2DArray fogHistoryImage;
+layout(set = 5, binding = 37, r16f) uniform image2DArray fogHistoryDepthImage;
+layout(set = 5, binding = 38, r16f) uniform image2DArray fogHistoryLengthImage;
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+layout(set = 2, binding = 1) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+const float kFogCheckerboardSentinel = -2.0;
+const float kInfDepth = 65504.0;
+const float kFogTemporalDepthThreshold = 0.15;
+const float kFogTemporalMinAlpha = 0.02;
+const float kFogTemporalMinAlphaReconstructed = 0.05;
+const float kFogTemporalMaxHistory = 64.0;
+const float kFogTemporalMaxHistoryReconstructed = 24.0;
+const float kFogTemporalAdditiveMinAlpha = 0.003;
+const float kFogTemporalAdditiveMinAlphaReconstructed = 0.01;
+const float kFogTemporalAdditiveMaxHistory = 320.0;
+const float kFogTemporalAdditiveMaxHistoryReconstructed = 96.0;
+const vec4 kFogTemporalVarianceClampK = vec4(2.05, 2.05, 2.05, 2.0);
+const vec4 kFogTemporalVarianceClampKReconstructed = vec4(2.35, 2.35, 2.35, 2.1);
+
+ivec3 fogHistoryCoord(ivec2 pixel, bool writeLayer) {
+    int layer = writeLayer ? 1 : 0;
+    return ivec3(pixel, layer);
+}
+
+ivec3 fogHistoryReadCoord(ivec2 pixel) {
+    return fogHistoryCoord(pixel, ADV_FOG_HISTORY_PING_INPUT ? false : true);
+}
+
+ivec3 fogHistoryWriteCoord(ivec2 pixel) {
+    return fogHistoryCoord(pixel, ADV_FOG_HISTORY_PING_INPUT ? true : false);
+}
+
+bool inBounds(ivec2 pixel, ivec2 size) {
+    return pixel.x >= 0 && pixel.y >= 0 && pixel.x < size.x && pixel.y < size.y;
+}
+
+bool inBounds(vec2 pixel, ivec2 size) {
+    return pixel.x >= 0.0 && pixel.y >= 0.0 && pixel.x < float(size.x) && pixel.y < float(size.y);
+}
+
+vec4 reconstructFogData(ivec2 pixel, ivec2 size) {
+    const ivec2 cardinalOffsets[4] = ivec2[](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    const ivec2 diagonalOffsets[4] = ivec2[](ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
+
+    vec3 additive = vec3(0.0);
+    float transmittance = 0.0;
+    int sampleCount = 0;
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 samplePixel = pixel + cardinalOffsets[i];
+        if (!inBounds(samplePixel, size)) { continue; }
+        vec4 sampleFog = imageLoad(fogImage, samplePixel);
+        if (sampleFog.a < 0.0) { continue; }
+        additive += sampleFog.rgb;
+        transmittance += sampleFog.a;
+        sampleCount++;
+    }
+
+    if (sampleCount == 0) {
+        for (int i = 0; i < 4; ++i) {
+            ivec2 samplePixel = pixel + diagonalOffsets[i];
+            if (!inBounds(samplePixel, size)) { continue; }
+            vec4 sampleFog = imageLoad(fogImage, samplePixel);
+            if (sampleFog.a < 0.0) { continue; }
+            additive += sampleFog.rgb;
+            transmittance += sampleFog.a;
+            sampleCount++;
+        }
+    }
+
+    if (sampleCount == 0) { return vec4(0.0, 0.0, 0.0, -1.0); }
+    return vec4(additive / float(sampleCount), transmittance / float(sampleCount));
+}
+
+vec4 clampFogHistory(ivec2 pixel, ivec2 size, vec4 historyFog, vec4 currentFog, bool checkerboardReconstructed) {
+    vec4 m1 = currentFog;
+    vec4 m2 = currentFog * currentFog;
+    int n = 1;
+
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) { continue; }
+            ivec2 samplePixel = pixel + ivec2(x, y);
+            if (!inBounds(samplePixel, size)) { continue; }
+
+            vec4 sampleFog = imageLoad(fogImage, samplePixel);
+            if (sampleFog.a <= kFogCheckerboardSentinel + 0.001 || sampleFog.a < 0.0) { continue; }
+
+            m1 += sampleFog;
+            m2 += sampleFog * sampleFog;
+            n++;
+        }
+    }
+
+    vec4 mean = m1 / float(n);
+    vec4 variance = max(m2 / float(n) - mean * mean, vec4(0.0));
+    vec4 sigma = sqrt(variance);
+
+    vec4 kVarianceClampK = checkerboardReconstructed ? kFogTemporalVarianceClampKReconstructed
+                                                     : kFogTemporalVarianceClampK;
+    vec4 lo = mean - sigma * kVarianceClampK;
+    vec4 hi = mean + sigma * kVarianceClampK;
+    return clamp(historyFog, lo, hi);
+}
+
+bool bilinearReprojectFog(vec2 prevPixel, ivec2 size, float currDepth, out vec4 historyFog, out float historyLength) {
+    vec2 p0f = floor(prevPixel);
+    ivec2 p00 = ivec2(p0f);
+    ivec2 p10 = p00 + ivec2(1, 0);
+    ivec2 p01 = p00 + ivec2(0, 1);
+    ivec2 p11 = p00 + ivec2(1, 1);
+    if (!inBounds(p00, size) || !inBounds(p10, size) || !inBounds(p01, size) || !inBounds(p11, size)) { return false; }
+
+    const ivec2 sampleOffsets[4] = ivec2[](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+    vec2 f = prevPixel - p0f;
+    const float weights[4] =
+        float[4]((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+
+    vec4 accumFog = vec4(0.0);
+    float accumHistoryLength = 0.0;
+    float accumWeight = 0.0;
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 samplePixel = p00 + sampleOffsets[i];
+        vec4 sampleFog = imageLoad(fogHistoryImage, fogHistoryReadCoord(samplePixel));
+        if (sampleFog.a < 0.0) { continue; }
+
+        float sampleDepth = imageLoad(fogHistoryDepthImage, fogHistoryReadCoord(samplePixel)).r;
+        if (isnan(sampleDepth) || isinf(sampleDepth) || sampleDepth >= kInfDepth * 0.9) { continue; }
+
+        float relativeDepthDelta = abs(currDepth - sampleDepth) / max(max(currDepth, sampleDepth), 0.01);
+        if (relativeDepthDelta > kFogTemporalDepthThreshold) { continue; }
+
+        float weight = weights[i];
+        accumFog += sampleFog * weight;
+        accumHistoryLength += imageLoad(fogHistoryLengthImage, fogHistoryReadCoord(samplePixel)).r * weight;
+        accumWeight += weight;
+    }
+
+    if (accumWeight <= 0.001) { return false; }
+
+    historyFog = accumFog / accumWeight;
+    historyLength = accumHistoryLength / accumWeight;
+    return true;
+}
+
+void clearFogHistory(ivec2 pixel) {
+    imageStore(fogHistoryImage, fogHistoryWriteCoord(pixel), vec4(0.0, 0.0, 0.0, -1.0));
+    imageStore(fogHistoryDepthImage, fogHistoryWriteCoord(pixel), vec4(kInfDepth, 0.0, 0.0, 0.0));
+    imageStore(fogHistoryLengthImage, fogHistoryWriteCoord(pixel), vec4(0.0, 0.0, 0.0, 0.0));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(hdrImage);
+    if (!inBounds(pixel, size)) return;
+
+    vec4 currentHdr = imageLoad(hdrImage, pixel);
+    vec4 rawFogData = imageLoad(fogImage, pixel);
+    bool fogWasCheckerboardSkipped = rawFogData.a <= kFogCheckerboardSentinel + 0.001;
+    vec4 currentFogData = rawFogData;
+    if (fogWasCheckerboardSkipped) {
+        currentFogData = reconstructFogData(pixel, size);
+    }
+
+    float currDepth = imageLoad(linearDepthImage, pixel).r;
+    bool currDepthValid = !(isnan(currDepth) || isinf(currDepth) || currDepth >= kInfDepth * 0.9);
+    bool hasCurrentFog = currentFogData.a >= 0.0 && currDepthValid;
+
+    vec3 baseRadiance = currentHdr.rgb;
+    if (hasCurrentFog && !fogWasCheckerboardSkipped) {
+        baseRadiance = max((currentHdr.rgb - currentFogData.rgb) / max(currentFogData.a, 1e-3), vec3(0.0));
+    }
+
+    vec4 resolvedFogData = vec4(0.0, 0.0, 0.0, -1.0);
+    float historyLength = 0.0;
+    vec2 motionVector = imageLoad(motionVectorImage, pixel).xy;
+    vec2 prevPixel = vec2(pixel) + worldUBO.cameraJitter + motionVector - lastWorldUBO.cameraJitter;
+    vec4 reprojectedFogData = vec4(0.0, 0.0, 0.0, -1.0);
+    float reprojectedHistoryLength = 0.0;
+    bool hasReprojectedFog = ADV_FOG_HISTORY_READY && currDepthValid && inBounds(prevPixel, size) &&
+                             bilinearReprojectFog(prevPixel, size, currDepth, reprojectedFogData,
+                                                  reprojectedHistoryLength);
+
+    if (hasCurrentFog) {
+        currentFogData = vec4(max(currentFogData.rgb, vec3(0.0)), clamp(currentFogData.a, 0.0, 1.0));
+        resolvedFogData = currentFogData;
+        historyLength = 1.0;
+
+        if (hasReprojectedFog) {
+            reprojectedFogData = clampFogHistory(pixel, size, reprojectedFogData, currentFogData,
+                                                 fogWasCheckerboardSkipped);
+
+            float maxHistoryA = fogWasCheckerboardSkipped ?
+                                    kFogTemporalMaxHistoryReconstructed : kFogTemporalMaxHistory;
+            float maxHistoryRGB = fogWasCheckerboardSkipped ?
+                                    kFogTemporalAdditiveMaxHistoryReconstructed :
+                                    kFogTemporalAdditiveMaxHistory;
+            historyLength = min(reprojectedHistoryLength + 1.0, maxHistoryA);
+            float historyLengthRGB = min(reprojectedHistoryLength + 1.0, maxHistoryRGB);
+
+            float minAlphaA = fogWasCheckerboardSkipped ?
+                                  kFogTemporalMinAlphaReconstructed : kFogTemporalMinAlpha;
+            float minAlphaRGB = fogWasCheckerboardSkipped ?
+                                    kFogTemporalAdditiveMinAlphaReconstructed :
+                                    kFogTemporalAdditiveMinAlpha;
+            float alphaA = max(1.0 / max(historyLength, 1.0), minAlphaA);
+            float alphaRGB = max(1.0 / max(historyLengthRGB, 1.0), minAlphaRGB);
+
+            resolvedFogData.rgb = mix(reprojectedFogData.rgb, currentFogData.rgb, alphaRGB);
+            resolvedFogData.a = mix(reprojectedFogData.a, currentFogData.a, alphaA);
+        }
+    } else if (fogWasCheckerboardSkipped && hasReprojectedFog) {
+        resolvedFogData = vec4(max(reprojectedFogData.rgb, vec3(0.0)), clamp(reprojectedFogData.a, 0.0, 1.0));
+        historyLength = min(reprojectedHistoryLength + 1.0, kFogTemporalMaxHistoryReconstructed);
+    }
+
+    if (resolvedFogData.a >= 0.0) {
+        vec3 composedRadiance = baseRadiance * resolvedFogData.a + resolvedFogData.rgb;
+        imageStore(hdrImage, pixel, vec4(max(composedRadiance, 0.0), currentHdr.a));
+        imageStore(fogHistoryImage, fogHistoryWriteCoord(pixel), resolvedFogData);
+        imageStore(fogHistoryDepthImage, fogHistoryWriteCoord(pixel), vec4(currDepth, 0.0, 0.0, 0.0));
+        imageStore(fogHistoryLengthImage, fogHistoryWriteCoord(pixel), vec4(historyLength, 0.0, 0.0, 0.0));
+    } else {
+        clearFogHistory(pixel);
+    }
+}

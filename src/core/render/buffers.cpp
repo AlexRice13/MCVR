@@ -53,6 +53,7 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     skyUniformBuffer_.resize(size);
     textureMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
+    cloudCoverageBuffer_.resize(size);
 
     for (uint32_t i = 0; i < size; i++) {
         overlayDrawUniformBuffer_[i] = vk::HostVisibleBuffer::create(
@@ -63,6 +64,12 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
             vma, device, std::max<uint32_t>(overlayPostUniformInitialSize, overlayPostUniformStride_),
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
         overlayPostUniformData_[i].reserve(overlayPostUniformBuffer_[i]->size());
+        constexpr uint32_t defaultCloudSize = 256 * 256;
+        std::vector<uint8_t> zeros(defaultCloudSize, 0);
+        cloudCoverageBuffer_[i] =
+            vk::HostVisibleBuffer::create(vma, device, defaultCloudSize,
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        cloudCoverageBuffer_[i]->uploadToBuffer(zeros.data(), defaultCloudSize, 0);
     }
 }
 
@@ -300,6 +307,10 @@ void Buffers::appendOverlayDrawUniform(uint8_t *srcPointer, uint32_t size, uint3
     if (cpuData.size() < requiredSize) { cpuData.resize(requiredSize, 0); }
 
     if (size > 0) { std::memcpy(cpuData.data() + uniformOffset, srcPointer, size); }
+    if (size >= 16) {
+        float sdrBrightnessNits = Renderer::options.hdrActive ? Renderer::options.sdrBrightness : 0.0f;
+        std::memcpy(cpuData.data() + uniformOffset + size - 16, &sdrBrightnessNits, sizeof(float));
+    }
 
     overlayDrawUniformWriteOffset_[frameIndex] = uniformOffset + alignedSize;
 
@@ -611,6 +622,35 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::exposureDataBuffer() {
     } else {
         return nullptr;
     }
+}
+
+std::shared_ptr<vk::HostVisibleBuffer> Buffers::cloudCoverageBuffer() {
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+
+    if (cloudCoverageBuffer_[context->frameIndex]) {
+        return cloudCoverageBuffer_[context->frameIndex];
+    } else {
+        return nullptr;
+    }
+}
+
+void Buffers::setAndUploadCloudCoverageBuffer(uint8_t *data, uint32_t width, uint32_t height) {
+    std::unique_lock<std::recursive_mutex> lck(mtx_);
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto vma = framework->vma();
+    auto device = framework->device();
+
+    uint32_t bufferSize = width * height;
+    if (bufferSize == 0) return;
+
+    if (cloudCoverageBuffer_[context->frameIndex] == nullptr || cloudCoverageBuffer_[context->frameIndex]->size() < bufferSize) {
+        cloudCoverageBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, bufferSize,
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+
+    cloudCoverageBuffer_[context->frameIndex]->uploadToBuffer(data, bufferSize, 0);
 }
 
 void Buffers::setUseJitter(bool useJitter) {

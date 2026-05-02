@@ -51,6 +51,8 @@ class Buffers : public SharedObject<Buffers> {
     std::shared_ptr<vk::HostVisibleBuffer> skyUniformBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> textureMappingBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> exposureDataBuffer();
+    std::shared_ptr<vk::HostVisibleBuffer> cloudCoverageBuffer();
+    void setAndUploadCloudCoverageBuffer(uint8_t *data, uint32_t width, uint32_t height);
 
     void setUseJitter(bool useJitter);
 
@@ -84,6 +86,7 @@ class Buffers : public SharedObject<Buffers> {
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> skyUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> textureMappingBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> exposureDataBuffer_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> cloudCoverageBuffer_;
 
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> importantIndexVertexBuffer_;
 

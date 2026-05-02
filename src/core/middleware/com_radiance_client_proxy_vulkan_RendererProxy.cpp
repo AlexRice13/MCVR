@@ -6,11 +6,14 @@
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
+#include "core/render/scenario_color_grading.hpp"
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
+#include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
 
 #include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 #    include <windows.h>
@@ -109,12 +112,160 @@ static std::filesystem::path JStringToPath(JNIEnv* env, jstring jstr) {
     return std::filesystem::path(u16);
 }
 
+static std::string JStringToUtf8(JNIEnv *env, jstring jstr) {
+    if (jstr == nullptr) return {};
+    const char *chars = env->GetStringUTFChars(jstr, nullptr);
+    std::string value(chars == nullptr ? "" : chars);
+    if (chars != nullptr) env->ReleaseStringUTFChars(jstr, chars);
+    return value;
+}
+
+static std::vector<std::string> JObjectArrayToStrings(JNIEnv *env, jobjectArray values) {
+    std::vector<std::string> strings;
+    if (values == nullptr) return strings;
+    jsize count = env->GetArrayLength(values);
+    strings.reserve(static_cast<size_t>(count));
+    for (jsize i = 0; i < count; ++i) {
+        auto element = static_cast<jstring>(env->GetObjectArrayElement(values, i));
+        strings.push_back(JStringToUtf8(env, element));
+        env->DeleteLocalRef(element);
+    }
+    return strings;
+}
+
+static std::shared_ptr<ToneMappingModule> tryFindToneMappingModule() {
+    auto framework = Renderer::instance().framework();
+    if (framework == nullptr) return nullptr;
+    auto pipeline = framework->pipeline();
+    if (pipeline == nullptr) return nullptr;
+    auto worldPipeline = pipeline->worldPipeline();
+    if (worldPipeline == nullptr) return nullptr;
+
+    for (const auto &module : worldPipeline->worldModules()) {
+        auto toneMappingModule = std::dynamic_pointer_cast<ToneMappingModule>(module);
+        if (toneMappingModule != nullptr) return toneMappingModule;
+    }
+    return nullptr;
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initFolderPath(JNIEnv *env,
                                                                                           jclass,
                                                                                           jstring folderPath) {
     if (folderPath == NULL) { return; }
 
     Renderer::folderPath = JStringToU16(env, folderPath);
+    if (!ScenarioColorGradingManager::is_initialized()) { ScenarioColorGradingManager::init(); }
+    ScenarioColorGradingManager::instance().setConfigPath(Renderer::folderPath / "scenarios_config.ini");
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_updateScenarioSceneContext(
+    JNIEnv *env,
+    jclass,
+    jstring dimensionKey,
+    jstring biomeKey,
+    jlong timeOfDay,
+    jboolean raining,
+    jboolean thundering,
+    jstring submersion,
+    jboolean indoors,
+    jboolean cave) {
+    if (!ScenarioColorGradingManager::is_initialized()) return;
+    ScenarioColorGradingManager::instance().updateSceneContext(
+        JStringToUtf8(env, dimensionKey),
+        JStringToUtf8(env, biomeKey),
+        static_cast<uint32_t>(timeOfDay),
+        raining == JNI_TRUE,
+        thundering == JNI_TRUE,
+        JStringToUtf8(env, submersion),
+        indoors == JNI_TRUE,
+        cave == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_saveScenarioColorGrading(
+    JNIEnv *env,
+    jclass,
+    jstring scenarioName,
+    jint priority,
+    jboolean saveWorld,
+    jboolean saveTime,
+    jboolean saveWeather,
+    jboolean saveBiome,
+    jboolean saveSubmersion,
+    jboolean saveIndoor,
+    jboolean saveCave,
+    jint timeStart,
+    jint timeEnd,
+    jobjectArray attributePairs) {
+    if (!ScenarioColorGradingManager::is_initialized()) return JNI_FALSE;
+
+    ScenarioSaveMetadataSelection selection{};
+    selection.world = saveWorld == JNI_TRUE;
+    selection.time = saveTime == JNI_TRUE;
+    selection.weather = saveWeather == JNI_TRUE;
+    selection.biome = saveBiome == JNI_TRUE;
+    selection.submersion = saveSubmersion == JNI_TRUE;
+    selection.indoor = saveIndoor == JNI_TRUE;
+    selection.cave = saveCave == JNI_TRUE;
+    selection.timeStart = static_cast<int>(timeStart);
+    selection.timeEnd = static_cast<int>(timeEnd);
+
+    bool saved = ScenarioColorGradingManager::instance().saveScenario(
+        JStringToUtf8(env, scenarioName), priority, selection, Renderer::options.hdrActive,
+        JObjectArrayToStrings(env, attributePairs));
+    return saved ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_getActiveScenarioColorGradingName(
+    JNIEnv *env, jclass) {
+    if (!ScenarioColorGradingManager::is_initialized()) return env->NewStringUTF("Default");
+    auto toneMappingModule = tryFindToneMappingModule();
+    if (toneMappingModule == nullptr) return env->NewStringUTF("Default");
+
+    auto state = ScenarioColorGradingManager::instance().resolveState(toneMappingModule->captureBaseSettings(),
+                                                                      Renderer::options.hdrActive);
+    return env->NewStringUTF(state.displayName.c_str());
+}
+
+JNIEXPORT jobjectArray JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_getActiveScenarioColorGradingValues(
+    JNIEnv *env, jclass, jobjectArray attributeKeys) {
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (stringClass == nullptr) return nullptr;
+    if (!ScenarioColorGradingManager::is_initialized()) return env->NewObjectArray(0, stringClass, nullptr);
+    auto toneMappingModule = tryFindToneMappingModule();
+    if (toneMappingModule == nullptr) return env->NewObjectArray(0, stringClass, nullptr);
+
+    auto pairs = ScenarioColorGradingManager::instance().exportResolvedAttributePairs(
+        toneMappingModule->captureBaseSettings(), Renderer::options.hdrActive, JObjectArrayToStrings(env, attributeKeys));
+    jobjectArray output = env->NewObjectArray(static_cast<jsize>(pairs.size()), stringClass, nullptr);
+    for (jsize i = 0; i < static_cast<jsize>(pairs.size()); ++i) {
+        jstring value = env->NewStringUTF(pairs[static_cast<size_t>(i)].c_str());
+        env->SetObjectArrayElement(output, i, value);
+        env->DeleteLocalRef(value);
+    }
+    return output;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_applyPreviewScenarioColorGrading(
+    JNIEnv *env, jclass, jobjectArray attributePairs) {
+    if (!ScenarioColorGradingManager::is_initialized()) return;
+
+    ToneMappingSettings previewSettings = createDefaultToneMappingSettings();
+    std::vector<std::string> pairs = JObjectArrayToStrings(env, attributePairs);
+    for (size_t i = 0; i + 1 < pairs.size(); i += 2) {
+        applyToneMappingAttributeKV(previewSettings, pairs[i], pairs[i + 1]);
+    }
+    ScenarioColorGradingManager::instance().setPreviewSettings(previewSettings);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_clearPreviewScenarioColorGrading(
+    JNIEnv *, jclass) {
+    if (!ScenarioColorGradingManager::is_initialized()) return;
+    ScenarioColorGradingManager::instance().clearPreviewSettings();
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_setScenarioGradingIsolation(
+    JNIEnv *, jclass, jboolean enabled) {
+    Renderer::options.scenarioGradingIsolation = enabled == JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initRenderer(JNIEnv *env,

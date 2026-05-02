@@ -25,6 +25,11 @@ struct Vertex {
     static constexpr uint32_t useLightBit = 1u << 5u;
     static constexpr uint32_t alphaModeShift = 8u;
     static constexpr uint32_t coordinateShift = 12u;
+    static constexpr uint32_t rainExposedMaterialBit = 1u << 17u;
+    static constexpr uint32_t rainPrecipitationMaterialBit = 1u << 18u;
+    static constexpr uint32_t rainSplashMaterialBit = 1u << 19u;
+    static constexpr uint32_t materialFlagMask =
+        rainExposedMaterialBit | rainPrecipitationMaterialBit | rainSplashMaterialBit;
 
     template <typename T>
     static VertexLayoutInfo initVertexLayout(std::vector<VertexAttribute> &attributes);
