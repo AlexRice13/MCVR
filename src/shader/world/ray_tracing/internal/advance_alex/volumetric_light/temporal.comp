@@ -76,7 +76,8 @@ void main() {
     ivec2 baseFullPixel = pixel * downsampleFactor;
     uint offsetSeed = xxhash32(uvec3(uint(pixel.x), uint(pixel.y), worldUBO.seed ^ 0x6A09E667u));
     uint downsampleFactorU = uint(max(downsampleFactor, 1));
-    ivec2 selectedOffset = ivec2(int(offsetSeed % downsampleFactorU), int((offsetSeed / downsampleFactorU) % downsampleFactorU));
+    ivec2 selectedOffset =
+        ivec2(int(offsetSeed % downsampleFactorU), int((offsetSeed / downsampleFactorU) % downsampleFactorU));
     ivec2 fullPixel = clamp(baseFullPixel + selectedOffset, ivec2(0), fullResolution - ivec2(1));
     vec2 motion = imageLoad(motionVectorImage, fullPixel).xy;
     vec2 prevFullPixel = vec2(fullPixel) + vec2(0.5) + motion;

@@ -1,4 +1,5 @@
 #include "common/constants.glsl"
+#include "common/ser.glsl"
 #include "common/parallax_condition.glsl"
 #ifndef ADV_DIRECT_LIGHT_SURFACE_GLSL
 #define ADV_DIRECT_LIGHT_SURFACE_GLSL
@@ -205,6 +206,10 @@ void prepareDirectLightSurface(PrimarySurfaceCache cache,
         }
     }
 
+    bool traceLocalHeight = ADV_EVALUATE_HEIGHT_MAP != 0 && hasHeightMapSurface &&
+                            shouldTraceRestirParallax(lod, cache.planeHitWorldPos);
+    advReorderThreadForPom(traceLocalHeight, hasFftWaterSurface);
+
     HeightMapHit initialHit;
     initialHit.hit = false;
     initialHit.sideWall = false;
@@ -213,9 +218,6 @@ void prepareDirectLightSurface(PrimarySurfaceCache cache,
     initialHit.uv = textureUV;
     initialHit.depth = 0.0;
     initialHit.geometricNormal = cache.baseGeoNormal;
-
-    bool traceLocalHeight = ADV_EVALUATE_HEIGHT_MAP != 0 && hasHeightMapSurface &&
-                            shouldTraceRestirParallax(lod, cache.planeHitWorldPos);
 
     if (traceLocalHeight) {
         HeightMapHit tracedInitialHit;

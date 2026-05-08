@@ -45,7 +45,9 @@ bool traceRestirNearestHeightMapCapped(sampler2D tex,
 
     int remainingUSteps = heightMapRemainingSteps(texel.x, atlasTexelMin.x, atlasTexelMax.x, rateUV.x);
     int remainingVSteps = heightMapRemainingSteps(texel.y, atlasTexelMin.y, atlasTexelMax.y, rateUV.y);
-    int maxSteps = min(maxTraceSteps, min(heightMapNearestMaxSteps, remainingUSteps + remainingVSteps + 4));
+    int projectedTexelTravel = remainingUSteps + remainingVSteps;
+    if (projectedTexelTravel > ADV_PARALLAX_MAX_DDA_TEXEL_TRAVEL) { return false; }
+    int maxSteps = min(maxTraceSteps, min(heightMapNearestMaxSteps, projectedTexelTravel + 4));
     if (maxSteps <= 0) { return false; }
 
     float tCurrent = 0.0;
@@ -381,6 +383,11 @@ bool traceRestirHeightMapCapped(sampler2D tex,
                                 uint samplingMode,
                                 int maxTraceSteps,
                                 out HeightMapHit hit) {
+    if (ADV_PARALLAX_QUALITY == 0) {
+        initRestirParallaxMiss(uv, depth, baseNormal, hit);
+        return false;
+    }
+
     if (samplingMode == 0u) {
         return traceRestirNearestHeightMapCapped(tex, minUV, maxUV, uv, depth, worldDir, dPdu, dPdv, baseNormal,
                                                 maxDepth, maxTraceSteps, hit);

@@ -11,6 +11,8 @@
 #    define USE_SHARC 0
 #endif
 
+#define ADV_SER_RAYGEN_STAGE 1
+
 #if USE_SHARC
 #    extension GL_EXT_shader_atomic_int64 : require
 #    extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -40,6 +42,9 @@
 #endif
 #ifndef ADV_ENABLE_RESTIR
 #    define ADV_ENABLE_RESTIR 1
+#endif
+#ifndef ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS
+#    define ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS 0
 #endif
 #define ADV_VOLUMETRIC_LIGHT_MODE_VANILLA 0u
 #define ADV_VOLUMETRIC_LIGHT_MODE_VOLUMETRIC 1u
@@ -385,7 +390,7 @@ bool evaluateFogAreaLightCandidate(ChunkPackedLight chunkLight,
 
 vec3 sampleRestirEmissiveFogLighting(vec3 samplePos, vec3 viewDir, inout uint rngSeed) {
 #if ADV_WORLD_PASS == ADV_WORLD_PASS_FINAL_COMPOSE
-    if (ADV_ENABLE_RESTIR == 0) { return vec3(0.0); }
+    if (ADV_ENABLE_RESTIR == 0 || ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS == 0) { return vec3(0.0); }
 
     uint centerChunkIndex = ADV_INVALID_AREA_LIGHT_SOURCE_INDEX;
     if (!tryGetFogAreaLightNeighborhood(samplePos, centerChunkIndex)) { return vec3(0.0); }

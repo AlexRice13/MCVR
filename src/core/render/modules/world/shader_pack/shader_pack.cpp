@@ -2002,8 +2002,16 @@ std::shared_ptr<vk::Shader> ShaderPack::createShader(
     ShaderPackLoader::Stage executionStage,
     uint32_t executionSet) const {
     const std::filesystem::path cacheDir = Renderer::folderPath / "cache/shaders";
+    auto definitionsWithDeviceCaps = mergeDefinitions(shaderAttributes_, definitions);
+    definitionsWithDeviceCaps["MCVR_DEVICE_RAY_TRACING_INVOCATION_REORDER"] =
+        device->hasRayTracingInvocationReorder() ? "1" : "0";
+#ifdef MCVR_ENABLE_SHADER_INVOCATION_REORDER_GLSL
+    definitionsWithDeviceCaps["MCVR_COMPILER_RAY_TRACING_INVOCATION_REORDER"] = "1";
+#else
+    definitionsWithDeviceCaps["MCVR_COMPILER_RAY_TRACING_INVOCATION_REORDER"] = "0";
+#endif
     auto compileResult = vk::Shader::compileGlslToSpv(
-        path.string(), stage, mergeDefinitions(shaderAttributes_, definitions),
+        path.string(), stage, definitionsWithDeviceCaps,
         shaderPack_.includeDirectories, executionSource(executionStage, executionSet), cacheDir);
     return vk::Shader::create(device, std::move(compileResult));
 }

@@ -4,6 +4,8 @@ add_library(core SHARED ${SOURCE_FILES})
 target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw minizip tinyexpr
                                    nlohmann_json::nlohmann_json)
 
+option(MCVR_ENABLE_SHADER_INVOCATION_REORDER_GLSL "Enable GLSL NV shader invocation reorder emission" ON)
+
 if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
     set(MCVR_VULKAN_SDK "$ENV{VULKAN_SDK}")
 else()
@@ -29,6 +31,9 @@ endif()
 target_include_directories(core PUBLIC ${GENTOOL_OUTPUT_DIR} ${VOLK_INCLUDE_DIR} ${GLFW_INCLUDE_DIR} ${VMA_INCLUDE_DIR} ${STB_INCLUDE_DIR} ${TINYEXPR_INCLUDE_DIR} ${JNI_INCLUDE_DIRS} ${GLM_INCLUDE_DIR} ${SHADERC_INCLUDE_DIR})
 target_link_libraries(core PUBLIC ${SHADERC_LIBRARY})
 target_compile_definitions(core PUBLIC VK_NO_PROTOTYPES CORE_LIB)
+if(MCVR_ENABLE_SHADER_INVOCATION_REORDER_GLSL)
+    target_compile_definitions(core PUBLIC MCVR_ENABLE_SHADER_INVOCATION_REORDER_GLSL)
+endif()
 if(USE_AMD)
     target_compile_definitions(core PUBLIC USE_AMD)
 endif()

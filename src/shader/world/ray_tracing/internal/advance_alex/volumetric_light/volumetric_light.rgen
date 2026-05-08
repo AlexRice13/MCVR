@@ -1,5 +1,11 @@
 #version 460
+#ifndef ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
+#    define ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY 1
+#endif
 #extension GL_EXT_ray_tracing : require
+#if ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
+#    extension GL_EXT_ray_query : require
+#endif
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_buffer_reference2 : require
@@ -45,6 +51,9 @@
 #endif
 #ifndef ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH
 #    define ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH 0.08
+#endif
+#ifndef ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS
+#    define ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS 0
 #endif
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
@@ -125,7 +134,49 @@ vec3 applySampledLightChroma(vec3 lightRadiance, vec3 lightDir) {
     return mix(lightRadiance, sampledChroma, 0.65);
 }
 
+#if ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
+vec2 inlineShadowTransmittanceUv(float planetRadius, float viewCos) {
+    float u = clamp(viewCos * 0.5 + 0.5, 0.0, 1.0);
+    float v = clamp((planetRadius - ADV_ATMOSPHERE_RG) / (ADV_ATMOSPHERE_RT - ADV_ATMOSPHERE_RG), 0.0, 1.0);
+    return vec2(u, v);
+}
+
+vec3 inlineShadowSkyRadiance(vec3 rayOrigin) {
+    vec3 sunDirection = celestialSunDirection();
+    const float celestialFadeThreshold = 0.3;
+
+    vec3 atmosphereCenter = vec3(0.0, -ADV_ATMOSPHERE_RG, 0.0);
+    vec3 rayOriginPlanet = rayOrigin - atmosphereCenter;
+    float planetRadius = length(rayOriginPlanet);
+    vec3 planetUp = rayOriginPlanet / max(planetRadius, 1e-6);
+    float sunUpDot = clamp(dot(planetUp, sunDirection), -1.0, 1.0);
+    planetRadius = clamp(planetRadius, ADV_ATMOSPHERE_RG, ADV_ATMOSPHERE_RT);
+
+    vec3 atmosphereTransmittance = sampleTexture(transLUT, inlineShadowTransmittanceUv(planetRadius, sunUpDot), false).rgb;
+    float sunRadianceScale =
+        sin(PI / (2.0 * celestialFadeThreshold) * min(max(sunDirection.y, 0.0), celestialFadeThreshold));
+    float moonRadianceScale =
+        sin(PI / (2.0 * celestialFadeThreshold) * min(max(-sunDirection.y, 0.0), celestialFadeThreshold));
+    return ADV_SUN_RADIANCE * atmosphereTransmittance * sunRadianceScale + ADV_MOON_RADIANCE * moonRadianceScale;
+}
+
+float traceInlineShadowVisibility(vec3 rayOrigin, vec3 rayDir, float maxDistance) {
+    rayQueryEXT query;
+    uint shadowMask = WORLD_MASK | PLAYER_MASK;
+    uint flags = gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT;
+    rayQueryInitializeEXT(query, topLevelAS, flags, shadowMask, rayOrigin, 0.001, rayDir, max(maxDistance, 0.05));
+    while (rayQueryProceedEXT(query)) {}
+    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+}
+#endif
+
 vec3 sampleDirectionalLight(vec3 position, vec3 lightDir, bool insideBoat) {
+#if ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
+    vec3 origin = position + lightDir * 0.02;
+    float visibility = traceInlineShadowVisibility(origin, lightDir, 1000.0);
+    vec3 radiance = applySampledLightChroma(inlineShadowSkyRadiance(origin) * visibility, lightDir) *
+                    (1.0 - skyUBO.rainGradient);
+#else
     shadowRay.radiance = vec3(0.0);
     shadowRay.throughput = vec3(1.0);
     shadowRay.insideBoat = insideBoat ? 1u : 0u;
@@ -134,9 +185,9 @@ vec3 sampleDirectionalLight(vec3 position, vec3 lightDir, bool insideBoat) {
     uint shadowMask = WORLD_MASK | PLAYER_MASK;
     if (ADV_CLOUD_MODE == 1u) { shadowMask |= CLOUD_MASK; }
     vec3 origin = position + lightDir * 0.02;
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 1, 1, 0, origin, 0.001,
-                lightDir, 1000.0, 1);
+    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 1, 1, 0, origin, 0.001, lightDir, 1000.0, 1);
     vec3 radiance = applySampledLightChroma(shadowRay.radiance, lightDir) * (1.0 - skyUBO.rainGradient);
+#endif
     vec3 absolutePosition = position + vec3(worldUBO.cameraPos.xyz);
     float cloudVisibility = ADV_CLOUD_MODE == 2u ? alexBlockyCloudLightVisibility(absolutePosition, lightDir) : 1.0;
     return radiance * cloudVisibility;
@@ -258,6 +309,9 @@ bool evaluateAreaLightCandidate(ChunkPackedLight chunkLight,
 }
 
 float traceAreaLightVisibility(vec3 position, vec3 dirToLight, float dist, bool insideBoat) {
+#if ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
+    return traceInlineShadowVisibility(position + dirToLight * 0.02, dirToLight, max(dist - 0.05, 0.05));
+#else
     shadowRay.radiance = vec3(0.0);
     shadowRay.throughput = vec3(1.0);
     shadowRay.insideBoat = insideBoat ? 1u : 0u;
@@ -265,13 +319,14 @@ float traceAreaLightVisibility(vec3 position, vec3 dirToLight, float dist, bool 
 
     uint shadowMask = WORLD_MASK | PLAYER_MASK;
     if (ADV_CLOUD_MODE == 1u) { shadowMask |= CLOUD_MASK; }
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 1, 1, 0, position + dirToLight * 0.02, 0.001,
-                dirToLight, max(dist - 0.05, 0.05), 1);
+    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 1, 1, 0, position + dirToLight * 0.02, 0.001, dirToLight,
+                max(dist - 0.05, 0.05), 1);
     return clamp(max(shadowRay.radiance.r, max(shadowRay.radiance.g, shadowRay.radiance.b)), 0.0, 1.0);
+#endif
 }
 
 vec3 sampleEmissiveVolumetricLight(vec3 position, vec3 rayDir, bool insideBoat, inout uint seed) {
-    if (ADV_ENABLE_RESTIR == 0) { return vec3(0.0); }
+    if (ADV_ENABLE_RESTIR == 0 || ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS == 0) { return vec3(0.0); }
 
     uint centerChunkIndex = ADV_INVALID_AREA_LIGHT_SOURCE_INDEX;
     if (!tryGetAreaLightNeighborhood(position, centerChunkIndex)) { return vec3(0.0); }

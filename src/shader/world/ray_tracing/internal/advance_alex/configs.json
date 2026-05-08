@@ -78,6 +78,20 @@
             "define": "ADV_ENABLE_PARALLAX"
         },
         {
+            "name": "render_pipeline.module.ray_tracing.attribute.parallax_quality",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.parallax_quality.off-render_pipeline.module.ray_tracing.attribute.parallax_quality.fast-render_pipeline.module.ray_tracing.attribute.parallax_quality.balanced-render_pipeline.module.ray_tracing.attribute.parallax_quality.high",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.parallax_quality.balanced",
+            "define": {
+                "ADV_PARALLAX_QUALITY": "X"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.parallax_ser",
+            "type": "bool",
+            "default_value": "render_pipeline.true",
+            "define": "ADV_ENABLE_SER"
+        },
+        {
             "name": "render_pipeline.module.ray_tracing.attribute.water_surface_mode",
             "type": "enum:render_pipeline.module.ray_tracing.attribute.water_surface_mode.vanilla-render_pipeline.module.ray_tracing.attribute.water_surface_mode.realistic",
             "default_value": "render_pipeline.module.ray_tracing.attribute.water_surface_mode.realistic",
@@ -122,6 +136,18 @@
             "type": "enum:render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.vanilla-render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.volumetric",
             "default_value": "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.volumetric",
             "define": "ADV_VOLUMETRIC_LIGHT_MODE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_fog_emissive_blocks",
+            "type": "bool",
+            "default_value": "render_pipeline.false",
+            "define": "ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_inline_ray_query",
+            "type": "bool",
+            "default_value": "render_pipeline.true",
+            "define": "ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_downsample_factor",

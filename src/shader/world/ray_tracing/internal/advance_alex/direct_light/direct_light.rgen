@@ -9,6 +9,8 @@
 #    define ADV_ENABLE_RESTIR 1
 #endif
 
+#define ADV_SER_RAYGEN_STAGE 1
+#include "common/ser.glsl"
 #include "common/shared.hpp"
 #include "common/chunk_lookup.glsl"
 #include "common/light.glsl"

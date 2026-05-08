@@ -19,6 +19,7 @@ class Device : public SharedObject<Device> {
     VkQueue &secondaryQueue();
 
     bool hasExtendedDynamicState2LogicOp() const;
+    bool hasRayTracingInvocationReorder() const;
     bool isDlssDeviceExtensionsCompatible() const;
     bool isXessDeviceExtensionsCompatible() const;
 
@@ -32,6 +33,7 @@ class Device : public SharedObject<Device> {
     VkQueue secondaryQueue_ = VK_NULL_HANDLE;
 
     bool extendedDynamicState2LogicOp_ = false;
+    bool rayTracingInvocationReorder_ = false;
     bool dlssDeviceExtensionsCompatible_ = false;
     bool xessDeviceExtensionsCompatible_ = false;
 };
