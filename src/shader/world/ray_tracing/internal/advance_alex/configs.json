@@ -1,7 +1,7 @@
 {
     "radiance": {
         "shader_pack": true,
-        "display_name": "§8§kXX §r§b§lAdvance Alex§r §8§kXX§r"
+        "display_name": "§8§kXX §r§b§lCan_It_Run_Radiance§r §8§kXX§r"
     },
     "requires_emission": true,
     "sharc": {
@@ -74,13 +74,13 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.enable_parallax",
             "type": "bool",
-            "default_value": "render_pipeline.false",
+            "default_value": "render_pipeline.true",
             "define": "ADV_ENABLE_PARALLAX"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.parallax_quality",
             "type": "enum:render_pipeline.module.ray_tracing.attribute.parallax_quality.off-render_pipeline.module.ray_tracing.attribute.parallax_quality.fast-render_pipeline.module.ray_tracing.attribute.parallax_quality.balanced-render_pipeline.module.ray_tracing.attribute.parallax_quality.high",
-            "default_value": "render_pipeline.module.ray_tracing.attribute.parallax_quality.balanced",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.parallax_quality.high",
             "define": {
                 "ADV_PARALLAX_QUALITY": "X"
             }
@@ -110,13 +110,13 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.alex_cloud_edge_softness",
             "type": "float_range:0.0-1.0",
-            "default_value": "0.50",
+            "default_value": "1.00",
             "define": "ADV_ALEX_CLOUD_EDGE_SOFTNESS"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.alex_cloud_density_gradient",
             "type": "float_range:0.0-1.0",
-            "default_value": "0.75",
+            "default_value": "0.65",
             "define": "ADV_ALEX_CLOUD_DENSITY_GRADIENT"
         },
         {
@@ -140,26 +140,56 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_fog_emissive_blocks",
             "type": "bool",
-            "default_value": "render_pipeline.false",
+            "default_value": "render_pipeline.true",
             "define": "ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.emissive_volume_light_strength",
             "type": "float_range:0.1-1.0",
-            "default_value": "0.10",
+            "default_value": "0.50",
             "define": "ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH"
-        },
-        {
-            "name": "render_pipeline.module.ray_tracing.attribute.emissive_volume_light_samples",
-            "type": "int_range:1-8",
-            "default_value": "4",
-            "define": "ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.emissive_volume_light_fade_distance",
             "type": "float_range:8.0-128.0",
             "default_value": "32.0",
             "define": "ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_grid_depth",
+            "type": "int_range:4-64",
+            "default_value": "16",
+            "define": "ADV_VOLUMETRIC_RESTIR_GRID_DEPTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_initial_samples",
+            "type": "int_range:1-16",
+            "default_value": "4",
+            "define": "ADV_VOLUMETRIC_RESTIR_INITIAL_SAMPLES"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_spatial_samples",
+            "type": "int_range:0-12",
+            "default_value": "8",
+            "define": "ADV_VOLUMETRIC_RESTIR_SPATIAL_SAMPLES"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_spatial_radius",
+            "type": "int_range:1-4",
+            "default_value": "2",
+            "define": "ADV_VOLUMETRIC_RESTIR_SPATIAL_RADIUS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_temporal_reuse",
+            "type": "bool",
+            "default_value": "render_pipeline.true",
+            "define": "ADV_VOLUMETRIC_RESTIR_TEMPORAL_REUSE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_m_cap",
+            "type": "float_range:1.0-64.0",
+            "default_value": "32.0",
+            "define": "ADV_VOLUMETRIC_RESTIR_M_CAP"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_inline_ray_query",
@@ -182,7 +212,7 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_scattering_strength",
             "type": "float_range:0.0-16.0",
-            "default_value": "2.75",
+            "default_value": "4.00",
             "define": "ADV_VOLUMETRIC_LIGHT_SCATTERING_STRENGTH"
         },
         {
@@ -200,7 +230,7 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_far_step_size",
             "type": "float_range:1.0-16.0",
-            "default_value": "5.0",
+            "default_value": "8.00",
             "define": "ADV_VOLUMETRIC_LIGHT_FAR_STEP_SIZE"
         },
         {
@@ -238,7 +268,7 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.sun_radiance",
             "type": "vec3",
-            "default_value": "8.0,8.0,8.0",
+            "default_value": "8,8,8",
             "define": {
                 "ADV_SUN_RADIANCE": "vec3(X)"
             }
@@ -286,7 +316,7 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.rayleigh_scattering_coefficient",
             "type": "vec3",
-            "default_value": "0.000005802,0.000013558,0.0000331",
+            "default_value": "5.802E-6,1.3558E-5,3.31E-5",
             "define": {
                 "ADV_ATMOSPHERE_BETA_R": "vec3(X)"
             }
@@ -300,7 +330,7 @@
         {
             "name": "render_pipeline.module.ray_tracing.attribute.mie_scattering_coefficient",
             "type": "vec3",
-            "default_value": "0.000021,0.000021,0.000021",
+            "default_value": "2.1E-5,2.1E-5,2.1E-5",
             "define": {
                 "ADV_ATMOSPHERE_BETA_M": "vec3(X)"
             }
@@ -611,6 +641,25 @@
             "type": "intermediate",
             "size": "CHUNK_NUM * (16 + ((2 * ADV_EMISSION_SIZE_XZ + 1) * (2 * ADV_EMISSION_SIZE_XZ + 1) * (2 * ADV_EMISSION_SIZE_Y + 1) * 16))",
             "binding": 14
+        },
+        {
+            "name": "volumetric_restir_candidates",
+            "type": "intermediate",
+            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 64",
+            "binding": 39
+        },
+        {
+            "name": "volumetric_restir_reservoirs",
+            "type": "intermediate",
+            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 64",
+            "binding": 40
+        },
+        {
+            "name": "volumetric_restir_history",
+            "type": "intermediate",
+            "shared": true,
+            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 128",
+            "binding": 41
         }
     ],
     "execution": {
@@ -632,6 +681,12 @@
             },
             {
                 "ADV_VOLUMETRIC_LIGHT_HISTORY_READY": false
+            },
+            {
+                "ADV_VOLUMETRIC_RESTIR_HISTORY_PING_INPUT": true
+            },
+            {
+                "ADV_VOLUMETRIC_RESTIR_HISTORY_READY": false
             },
             {
                 "ADV_FOG_HISTORY_PING_INPUT": true
@@ -679,6 +734,12 @@
                     "condition": "ADV_VOLUMETRIC_LIGHT_MODE != 0",
                     "then": [
                         {
+                            "pass": "volumetric_restir_initial"
+                        },
+                        {
+                            "pass": "volumetric_restir_spatial_temporal"
+                        },
+                        {
                             "pass": "volumetric_light"
                         },
                         {
@@ -689,6 +750,16 @@
                         },
                         {
                             "pass": "volumetric_light_blur_v"
+                        },
+                        {
+                            "assign": {
+                                "ADV_VOLUMETRIC_RESTIR_HISTORY_PING_INPUT": "!ADV_VOLUMETRIC_RESTIR_HISTORY_PING_INPUT"
+                            }
+                        },
+                        {
+                            "assign": {
+                                "ADV_VOLUMETRIC_RESTIR_HISTORY_READY": true
+                            }
                         },
                         {
                             "assign": {
@@ -708,6 +779,11 @@
                         {
                             "assign": {
                                 "ADV_VOLUMETRIC_LIGHT_HISTORY_READY": false
+                            }
+                        },
+                        {
+                            "assign": {
+                                "ADV_VOLUMETRIC_RESTIR_HISTORY_READY": false
                             }
                         }
                     ]
@@ -999,6 +1075,58 @@
             ]
         },
         {
+            "type": "compute",
+            "name": "volumetric_restir_initial",
+            "inputs": {
+                "images": [
+                    "out:linear_depth"
+                ],
+                "buffers": [
+                    "restir_light_neighborhoods"
+                ]
+            },
+            "outputs": {
+                "buffers": [
+                    "volumetric_restir_candidates",
+                    "volumetric_restir_reservoirs",
+                    "volumetric_restir_history"
+                ]
+            },
+            "compute": "volumetric_light/restir_reservoirs.comp",
+            "definitions": {
+                "ADV_VOLUMETRIC_RESTIR_PASS": "0"
+            },
+            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gz": "(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH + 3) / 4"
+        },
+        {
+            "type": "compute",
+            "name": "volumetric_restir_spatial_temporal",
+            "inputs": {
+                "images": [
+                    "out:linear_depth"
+                ],
+                "buffers": [
+                    "volumetric_restir_candidates",
+                    "volumetric_restir_history"
+                ]
+            },
+            "outputs": {
+                "buffers": [
+                    "volumetric_restir_reservoirs",
+                    "volumetric_restir_history"
+                ]
+            },
+            "compute": "volumetric_light/restir_reservoirs.comp",
+            "definitions": {
+                "ADV_VOLUMETRIC_RESTIR_PASS": "1"
+            },
+            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gz": "(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH + 3) / 4"
+        },
+        {
             "type": "ray_tracing",
             "name": "volumetric_light",
             "inputs": {
@@ -1009,7 +1137,10 @@
                     "primary_ray_state"
                 ],
                 "buffers": [
-                    "restir_light_neighborhoods"
+                    "restir_light_neighborhoods",
+                    "volumetric_restir_candidates",
+                    "volumetric_restir_reservoirs",
+                    "volumetric_restir_history"
                 ]
             },
             "outputs": {
@@ -1043,6 +1174,24 @@
                     "shader": "common/shadow.rmiss"
                 }
             ]
+        },
+        {
+            "type": "compute",
+            "name": "volumetric_light_copy_raw",
+            "inputs": {
+                "images": [
+                    "volumetric_light_raw"
+                ]
+            },
+            "outputs": {
+                "images": [
+                    "volumetric_light"
+                ]
+            },
+            "compute": "volumetric_light/copy_raw.comp",
+            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 7) / 8",
+            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 7) / 8",
+            "gz": "1"
         },
         {
             "type": "compute",

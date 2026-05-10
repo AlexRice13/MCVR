@@ -52,11 +52,14 @@
 #ifndef ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH
 #    define ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH 0.08
 #endif
-#ifndef ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES
-#    define ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES 4
-#endif
 #ifndef ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE
 #    define ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE 32.0
+#endif
+#ifndef ADV_EMISSIVE_VOLUME_LIGHT_FALLBACK_SAMPLES
+#    define ADV_EMISSIVE_VOLUME_LIGHT_FALLBACK_SAMPLES 8
+#endif
+#ifndef ADV_EMISSIVE_VOLUME_LIGHT_MAX_RADIANCE
+#    define ADV_EMISSIVE_VOLUME_LIGHT_MAX_RADIANCE 48.0
 #endif
 #ifndef ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS
 #    define ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS 0
@@ -66,6 +69,10 @@ layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
 layout(set = 2, binding = 0) uniform WorldUniform {
     WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 1) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
 };
 
 layout(set = 2, binding = 2) uniform SkyUniform {
@@ -83,6 +90,7 @@ layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 #include "common/alex_blocky_cloud_shadow.glsl"
 #include "common/light.glsl"
 #include "common/light_neighborhood.glsl"
+#include "common/volumetric_restir_reservoir.glsl"
 
 bool finiteFloat(float value) {
     return !isnan(value) && !isinf(value);
@@ -199,39 +207,39 @@ vec3 sampleDirectionalLight(vec3 position, vec3 lightDir, bool insideBoat) {
     return radiance * cloudVisibility;
 }
 
-float areaLightTriangleArea(vec3 a, vec3 b, vec3 c) {
-    return 0.5 * length(cross(b - a, c - a));
+float traceAreaLightVisibility(vec3 position, vec3 dirToLight, float dist, bool insideBoat) {
+#if ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
+    return traceInlineShadowVisibility(position + dirToLight * 0.02, dirToLight, max(dist - 0.05, 0.05));
+#else
+    shadowRay.radiance = vec3(0.0);
+    shadowRay.throughput = vec3(1.0);
+    shadowRay.insideBoat = insideBoat ? 1u : 0u;
+    shadowRay.pad0 = 1u;
+
+    uint shadowMask = WORLD_MASK | PLAYER_MASK;
+    if (ADV_CLOUD_MODE == 1u) { shadowMask |= CLOUD_MASK; }
+    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 1, 1, 0, position + dirToLight * 0.02, 0.001, dirToLight,
+                max(dist - 0.05, 0.05), 1);
+    return clamp(max(shadowRay.radiance.r, max(shadowRay.radiance.g, shadowRay.radiance.b)), 0.0, 1.0);
+#endif
 }
 
-vec3 sampleAreaLightTriangle(vec3 a, vec3 b, vec3 c, vec2 xi) {
-    float sqrtXi = sqrt(clamp(xi.x, 0.0, 1.0));
-    float bary0 = 1.0 - sqrtXi;
-    float bary1 = xi.y * sqrtXi;
-    float bary2 = 1.0 - bary0 - bary1;
-    return a * bary0 + b * bary1 + c * bary2;
+vec3 clampEmissiveVolumetricRadiance(vec3 value) {
+    vec3 positiveValue = max(value, vec3(0.0));
+    float lum = luminance(positiveValue);
+    if (!finiteFloat(lum) || lum <= 1e-6) { return vec3(0.0); }
+
+    float limit = max(float(ADV_EMISSIVE_VOLUME_LIGHT_MAX_RADIANCE), 1.0);
+    if (lum <= limit) { return positiveValue; }
+
+    float compressedLum = limit * (1.0 - exp(-lum / limit));
+    return positiveValue * (compressedLum / lum);
 }
 
-bool tryGetAreaLightNeighborhood(vec3 position, out uint centerChunkIndex) {
-    centerChunkIndex = ADV_INVALID_AREA_LIGHT_SOURCE_INDEX;
-
-    ivec3 sectionCoordinate = ivec3(floor((position + vec3(worldUBO.cameraPos.xyz)) / 16.0));
-    int resolvedCenterChunkIndex = -1;
-    ivec3 centerChunkOrigin = ivec3(0);
-    if (!tryGetChunkIndexFromSectionCoordinate(sectionCoordinate, worldUBO, resolvedCenterChunkIndex, centerChunkOrigin)) {
-        return false;
-    }
-
-    ChunkLightData centerChunk = chunkPackedData[resolvedCenterChunkIndex];
-    if (!chunkPackedDataMatchesOrigin(centerChunk, centerChunkOrigin)) { return false; }
-
-    centerChunkIndex = uint(resolvedCenterChunkIndex);
-    return chunkLightNeighborhoodCount(chunkLightNeighborhoods[centerChunkIndex]) > 0u;
-}
-
-bool sampleAreaLightSource(uint centerChunkIndex,
-                           inout uint seed,
-                           out ChunkPackedLight chunkLight,
-                           out float proposalPdf) {
+bool sampleDirectEmissiveAreaLightSource(uint centerChunkIndex,
+                                         inout uint seed,
+                                         out ChunkPackedLight chunkLight,
+                                         out float proposalPdf) {
     proposalPdf = 0.0;
 
     ChunkLightNeighborhood neighborhood = chunkLightNeighborhoods[centerChunkIndex];
@@ -252,24 +260,22 @@ bool sampleAreaLightSource(uint centerChunkIndex,
     vec3 p1 = chunkLight.p1.xyz;
     vec3 p2 = chunkLight.p2.xyz;
     vec3 p3 = chunkLight.p3.xyz;
-    float totalArea = max(areaLightTriangleArea(p0, p1, p2) + areaLightTriangleArea(p0, p2, p3), chunkLight.p0Area.w);
+    float totalArea = max(volumetricRestirTriangleArea(p0, p1, p2) + volumetricRestirTriangleArea(p0, p2, p3),
+                          chunkLight.p0Area.w);
     if (totalArea <= 1e-8) { return false; }
 
     proposalPdf = chunkProbability * (1.0 / float(sampledChunk.lightCount)) * (1.0 / totalArea);
     return proposalPdf > 1e-8;
 }
 
-bool evaluateAreaLightCandidate(ChunkPackedLight chunkLight,
-                                float proposalPdf,
-                                vec3 position,
-                                vec3 rayDir,
-                                inout uint seed,
-                                out vec3 contribution,
-                                out float targetPdf,
-                                out vec3 dirToLight,
-                                out float dist) {
+bool evaluateDirectEmissiveAreaLightCandidate(ChunkPackedLight chunkLight,
+                                              float proposalPdf,
+                                              vec3 position,
+                                              inout uint seed,
+                                              out vec3 contribution,
+                                              out vec3 dirToLight,
+                                              out float dist) {
     contribution = vec3(0.0);
-    targetPdf = 0.0;
     dirToLight = vec3(0.0);
     dist = 0.0;
 
@@ -277,8 +283,8 @@ bool evaluateAreaLightCandidate(ChunkPackedLight chunkLight,
     vec3 p1 = chunkLight.p1.xyz;
     vec3 p2 = chunkLight.p2.xyz;
     vec3 p3 = chunkLight.p3.xyz;
-    float area0 = areaLightTriangleArea(p0, p1, p2);
-    float area1 = areaLightTriangleArea(p0, p2, p3);
+    float area0 = volumetricRestirTriangleArea(p0, p1, p2);
+    float area1 = volumetricRestirTriangleArea(p0, p2, p3);
     float totalArea = max(area0 + area1, chunkLight.p0Area.w);
     if (totalArea <= 1e-8 || proposalPdf <= 1e-8) { return false; }
 
@@ -286,10 +292,10 @@ bool evaluateAreaLightCandidate(ChunkPackedLight chunkLight,
     vec3 lightPoint;
     vec3 lightNormal;
     if (firstTriangle) {
-        lightPoint = sampleAreaLightTriangle(p0, p1, p2, vec2(rand(seed), rand(seed)));
+        lightPoint = volumetricRestirSampleTriangle(p0, p1, p2, vec2(rand(seed), rand(seed)));
         lightNormal = safeNormalize(cross(p1 - p0, p2 - p0), chunkLight.normal.xyz);
     } else {
-        lightPoint = sampleAreaLightTriangle(p0, p2, p3, vec2(rand(seed), rand(seed)));
+        lightPoint = volumetricRestirSampleTriangle(p0, p2, p3, vec2(rand(seed), rand(seed)));
         lightNormal = safeNormalize(cross(p2 - p0, p3 - p0), chunkLight.normal.xyz);
     }
 
@@ -313,58 +319,79 @@ bool evaluateAreaLightCandidate(ChunkPackedLight chunkLight,
     contribution = ADV_DIRECT_LIGHT_STRENGTH * ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH * lightRadiance * lightNoL /
                    max(dist2 * proposalPdf, 1e-6);
     contribution *= distanceFade;
-    if (!finiteVec3(contribution)) { return false; }
-
-    targetPdf = max(max(contribution.r, contribution.g), contribution.b);
-    return targetPdf > 1e-6;
+    contribution = clampEmissiveVolumetricRadiance(contribution);
+    return finiteVec3(contribution) && max(max(contribution.r, contribution.g), contribution.b) > 1e-6;
 }
 
-float traceAreaLightVisibility(vec3 position, vec3 dirToLight, float dist, bool insideBoat) {
-#if ADV_VOLUMETRIC_LIGHT_INLINE_RAY_QUERY
-    return traceInlineShadowVisibility(position + dirToLight * 0.02, dirToLight, max(dist - 0.05, 0.05));
-#else
-    shadowRay.radiance = vec3(0.0);
-    shadowRay.throughput = vec3(1.0);
-    shadowRay.insideBoat = insideBoat ? 1u : 0u;
-    shadowRay.pad0 = 1u;
-
-    uint shadowMask = WORLD_MASK | PLAYER_MASK;
-    if (ADV_CLOUD_MODE == 1u) { shadowMask |= CLOUD_MASK; }
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 1, 1, 0, position + dirToLight * 0.02, 0.001, dirToLight,
-                max(dist - 0.05, 0.05), 1);
-    return clamp(max(shadowRay.radiance.r, max(shadowRay.radiance.g, shadowRay.radiance.b)), 0.0, 1.0);
-#endif
-}
-
-vec3 sampleEmissiveVolumetricLight(vec3 position, vec3 rayDir, bool insideBoat, inout uint seed) {
-    if (ADV_ENABLE_RESTIR == 0 || ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS == 0) { return vec3(0.0); }
-
+vec3 sampleDirectEmissiveVolumetricLight(vec3 position, bool insideBoat, inout uint seed) {
     uint centerChunkIndex = ADV_INVALID_AREA_LIGHT_SOURCE_INDEX;
-    if (!tryGetAreaLightNeighborhood(position, centerChunkIndex)) { return vec3(0.0); }
+    if (!volumetricRestirTryGetNeighborhoodIndex(position, centerChunkIndex)) { return vec3(0.0); }
 
     vec3 radiance = vec3(0.0);
-    uint candidateCount = max(uint(ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES), 1u);
+    uint candidateCount = max(uint(ADV_EMISSIVE_VOLUME_LIGHT_FALLBACK_SAMPLES), 1u);
     for (uint i = 0u; i < candidateCount; ++i) {
         ChunkPackedLight chunkLight;
         float proposalPdf = 0.0;
-        if (!sampleAreaLightSource(centerChunkIndex, seed, chunkLight, proposalPdf)) { continue; }
+        if (!sampleDirectEmissiveAreaLightSource(centerChunkIndex, seed, chunkLight, proposalPdf)) { continue; }
 
         vec3 contribution;
-        float targetPdf;
         vec3 dirToLight;
         float dist;
-        if (!evaluateAreaLightCandidate(chunkLight, proposalPdf, position, rayDir, seed, contribution, targetPdf,
-                                        dirToLight, dist)) {
+        if (!evaluateDirectEmissiveAreaLightCandidate(chunkLight, proposalPdf, position, seed, contribution, dirToLight,
+                                                      dist)) {
             continue;
         }
 
         float visibility = traceAreaLightVisibility(position, dirToLight, dist, insideBoat);
         if (visibility <= 1e-3) { continue; }
-
         radiance += contribution * visibility;
     }
 
-    return radiance / float(candidateCount);
+    return clampEmissiveVolumetricRadiance(radiance / float(candidateCount));
+}
+
+bool tryEvaluateVolumetricRestirReservoir(VolumetricRestirSample reservoir,
+                                          vec3 position,
+                                          vec3 rayDir,
+                                          bool insideBoat,
+                                          out vec3 radiance) {
+    radiance = vec3(0.0);
+    if (!volumetricRestirSourceAddressable(reservoir)) { return false; }
+
+    vec3 dirToLight;
+    float dist;
+    radiance = volumetricRestirEvaluateRadiance(position, rayDir, reservoir, dirToLight, dist);
+    radiance = clampEmissiveVolumetricRadiance(radiance);
+    if (!finiteVec3(radiance) || max(max(radiance.r, radiance.g), radiance.b) <= 1e-8) { return false; }
+
+    float visibility = traceAreaLightVisibility(position, dirToLight, dist, insideBoat);
+    if (visibility <= 1e-3) { return false; }
+    radiance *= visibility;
+    return true;
+}
+
+vec3 sampleEmissiveVolumetricLight(vec3 position,
+                                   vec3 rayDir,
+                                   bool insideBoat,
+                                   ivec2 lowPixel,
+                                   float rayDistance,
+                                   inout uint seed) {
+    if (ADV_ENABLE_RESTIR == 0 || ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS == 0) { return vec3(0.0); }
+
+    uvec3 gridSize = uvec3(imageSize(volumetricLightRawImage), uint(max(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH, 1)));
+    uvec3 coord;
+    if (!volumetricRestirCoordFromPixelDistance(lowPixel, rayDistance, gridSize, coord)) {
+        return sampleDirectEmissiveVolumetricLight(position, insideBoat, seed);
+    }
+
+    VolumetricRestirSample reservoir = decodeVolumetricRestirReservoir(loadVolumetricRestirCurrent(coord, gridSize));
+    vec3 radiance;
+    if (tryEvaluateVolumetricRestirReservoir(reservoir, position, rayDir, insideBoat, radiance)) { return radiance; }
+
+    reservoir = decodeVolumetricRestirReservoir(loadVolumetricRestirCandidate(coord, gridSize));
+    if (tryEvaluateVolumetricRestirReservoir(reservoir, position, rayDir, insideBoat, radiance)) { return radiance; }
+
+    return sampleDirectEmissiveVolumetricLight(position, insideBoat, seed);
 }
 
 void airMedium(float cosTheta, out vec3 sigmaS, out vec3 sigmaT) {
@@ -530,9 +557,8 @@ void main() {
     buildCameraRay(fullPixel, fullResolution, origin, rayDir);
 
     bool underwater = skyUBO.cameraSubmersionType == 1;
-    float mediumMaxDistance =
-        underwater ? clamp(worldUBO.fogEnd * 1.5, 16.0, 96.0) :
-                     clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
+    float airMaxDistance = clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
+    float mediumMaxDistance = underwater ? airMaxDistance * 0.5 : airMaxDistance;
     float endDistance = rayDistanceFromViewDepth(sampleLinearDepth, rayDir);
     if (endDistance >= INF_DISTANCE) { endDistance = mediumMaxDistance; }
     endDistance = min(endDistance, mediumMaxDistance);
@@ -556,6 +582,8 @@ void main() {
 
     vec3 transmittance = vec3(1.0);
     vec3 radiance = vec3(0.0);
+    float historyDepthSum = 0.0;
+    float historyDepthWeightSum = 0.0;
     bool insideBoat = hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_INSIDE_BOAT);
 
     float marchT = 0.0;
@@ -567,8 +595,9 @@ void main() {
         float t = marchT + stepLength * jitter;
         vec3 position = origin + rayDir * t;
         vec3 directionalRadiance = sampleDirectionalLight(position, lightDir, insideBoat);
-        vec3 emissiveRadiance = underwater ? vec3(0.0) :
-                                             sampleEmissiveVolumetricLight(position, rayDir, insideBoat, seed);
+        float underwaterBrightnessScale = underwater ? 1.5 : 1.0;
+        vec3 emissiveRadiance =
+            sampleEmissiveVolumetricLight(position, rayDir, insideBoat, lowPixel, t, seed) * underwaterBrightnessScale;
 
         float densityScale = underwater ? 1.0 : airDensityFade(t);
         float shaftDistanceFade = underwater ? 1.0 : 1.0 - smoothstep(mediumMaxDistance * 0.45, mediumMaxDistance, t);
@@ -581,8 +610,16 @@ void main() {
         vec3 localSigmaT = sigmaT * densityScale * extinctionScale;
         vec3 segmentTransmittance = exp(-localSigmaT * stepLength);
         vec3 segment = segmentIntegral(localSigmaT, segmentTransmittance, stepLength);
-        radiance += transmittance *
-                    (directionalRadiance * localSigmaS + emissiveRadiance * localEmissiveSigmaS) * segment;
+        vec3 stepRadiance = transmittance *
+                            (directionalRadiance * localSigmaS * underwaterBrightnessScale +
+                             emissiveRadiance * localEmissiveSigmaS) *
+                            segment;
+        radiance += stepRadiance;
+        float stepHistoryWeight = luminance(max(stepRadiance, vec3(0.0)));
+        if (finiteFloat(stepHistoryWeight) && stepHistoryWeight > 1e-8) {
+            historyDepthSum += t * stepHistoryWeight;
+            historyDepthWeightSum += stepHistoryWeight;
+        }
         transmittance *= segmentTransmittance;
         marchT += stepLength;
 
@@ -591,5 +628,7 @@ void main() {
 
     if (!finiteVec3(radiance)) { radiance = vec3(0.0); }
     radiance = softClampRadiance(radiance);
-    imageStore(volumetricLightRawImage, lowPixel, vec4(max(radiance, vec3(0.0)), sampleLinearDepth));
+    float historyDepth = historyDepthWeightSum > 1e-8 ? historyDepthSum / historyDepthWeightSum : min(endDistance, mediumMaxDistance);
+    if (!finiteFloat(historyDepth) || historyDepth <= 0.0) { historyDepth = min(endDistance, mediumMaxDistance); }
+    imageStore(volumetricLightRawImage, lowPixel, vec4(max(radiance, vec3(0.0)), historyDepth));
 }
