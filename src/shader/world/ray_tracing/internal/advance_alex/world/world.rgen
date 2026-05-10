@@ -536,7 +536,8 @@ void applySceneFog(vec3 radiance,
 }
 
 float volumetricMediumMaxDistance(bool underwater) {
-    return clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
+    return underwater ? clamp(worldUBO.fogEnd * 1.5, 16.0, 96.0) :
+                        clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
 }
 
 float volumetricAirDensityFade(float t) {
@@ -556,18 +557,25 @@ vec3 volumetricAirSigmaTBase() {
     return betaR + betaM * 1.15 + vec3(fogDensity);
 }
 
+vec3 volumetricWaterSigmaTBase() {
+    float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
+    float waterDensity = max(2.0 / fogRange, 0.015);
+    vec3 waterTint = ADV_WATER_TINT;
+    return (vec3(1.0) - waterTint) * waterDensity * 1.20 + waterTint * waterDensity * 0.18;
+}
+
 vec3 integrateVolumetricFogTransmittance(float endDistance, bool underwater) {
     if (endDistance <= 0.05) { return vec3(1.0); }
 
     const int stepCount = 4;
     float stepLength = endDistance / float(stepCount);
-    float extinctionScale = 0.45;
-    vec3 baseSigmaT = volumetricAirSigmaTBase();
+    float extinctionScale = underwater ? 1.0 : 0.45;
+    vec3 baseSigmaT = underwater ? volumetricWaterSigmaTBase() : volumetricAirSigmaTBase();
     vec3 transmittance = vec3(1.0);
 
     for (int i = 0; i < stepCount; ++i) {
         float t = (float(i) + 0.5) * stepLength;
-        float densityScale = volumetricAirDensityFade(t);
+        float densityScale = underwater ? 1.0 : volumetricAirDensityFade(t);
         vec3 localSigmaT = baseSigmaT * densityScale * extinctionScale;
         transmittance *= exp(-localSigmaT * stepLength);
 

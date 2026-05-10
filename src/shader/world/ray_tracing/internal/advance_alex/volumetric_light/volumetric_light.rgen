@@ -52,6 +52,12 @@
 #ifndef ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH
 #    define ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH 0.08
 #endif
+#ifndef ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES
+#    define ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES 4
+#endif
+#ifndef ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE
+#    define ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE 32.0
+#endif
 #ifndef ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS
 #    define ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS 0
 #endif
@@ -299,9 +305,14 @@ bool evaluateAreaLightCandidate(ChunkPackedLight chunkLight,
     float lightNoL = max(dot(safeNormalize(lightNormal, vec3(0.0, 1.0, 0.0)), -dirToLight), 0.0);
     if (lightNoL <= 1e-5) { return false; }
 
+    float influenceRadius = clamp(float(ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE), 8.0, 128.0);
+    float distanceFade = 1.0 - smoothstep(influenceRadius * 0.65, influenceRadius, dist);
+    if (distanceFade <= 1e-4) { return false; }
+
     vec3 lightRadiance = max(chunkLight.radiance.rgb, vec3(0.0));
     contribution = ADV_DIRECT_LIGHT_STRENGTH * ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH * lightRadiance * lightNoL /
                    max(dist2 * proposalPdf, 1e-6);
+    contribution *= distanceFade;
     if (!finiteVec3(contribution)) { return false; }
 
     targetPdf = max(max(contribution.r, contribution.g), contribution.b);
@@ -331,13 +342,8 @@ vec3 sampleEmissiveVolumetricLight(vec3 position, vec3 rayDir, bool insideBoat, 
     uint centerChunkIndex = ADV_INVALID_AREA_LIGHT_SOURCE_INDEX;
     if (!tryGetAreaLightNeighborhood(position, centerChunkIndex)) { return vec3(0.0); }
 
-    vec3 pickedContribution = vec3(0.0);
-    vec3 pickedDir = vec3(0.0);
-    float pickedDist = 0.0;
-    float pickedPdf = 0.0;
-    float weightSum = 0.0;
-
-    const uint candidateCount = 2u;
+    vec3 radiance = vec3(0.0);
+    uint candidateCount = max(uint(ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES), 1u);
     for (uint i = 0u; i < candidateCount; ++i) {
         ChunkPackedLight chunkLight;
         float proposalPdf = 0.0;
@@ -352,22 +358,13 @@ vec3 sampleEmissiveVolumetricLight(vec3 position, vec3 rayDir, bool insideBoat, 
             continue;
         }
 
-        float nextWeightSum = weightSum + targetPdf;
-        if (rand(seed) * nextWeightSum < targetPdf) {
-            pickedContribution = contribution;
-            pickedDir = dirToLight;
-            pickedDist = dist;
-            pickedPdf = targetPdf;
-        }
-        weightSum = nextWeightSum;
+        float visibility = traceAreaLightVisibility(position, dirToLight, dist, insideBoat);
+        if (visibility <= 1e-3) { continue; }
+
+        radiance += contribution * visibility;
     }
 
-    if (pickedPdf <= 1e-6 || weightSum <= 1e-6) { return vec3(0.0); }
-
-    float visibility = traceAreaLightVisibility(position, pickedDir, pickedDist, insideBoat);
-    if (visibility <= 1e-3) { return vec3(0.0); }
-
-    return pickedContribution * visibility * (weightSum / (pickedPdf * float(candidateCount)));
+    return radiance / float(candidateCount);
 }
 
 void airMedium(float cosTheta, out vec3 sigmaS, out vec3 sigmaT) {
@@ -386,6 +383,15 @@ void airMedium(float cosTheta, out vec3 sigmaS, out vec3 sigmaT) {
     sigmaT = betaR + betaM * 1.15 + vec3(fogDensity);
 }
 
+void waterMedium(float cosTheta, out vec3 sigmaS, out vec3 sigmaT) {
+    float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
+    float waterDensity = max(2.0 / fogRange, 0.015);
+    vec3 waterTint = ADV_WATER_TINT;
+
+    sigmaS = waterTint * waterDensity * henyeyGreenstein(cosTheta, 0.55) * 0.55;
+    sigmaT = (vec3(1.0) - waterTint) * waterDensity * 1.20 + waterTint * waterDensity * 0.18;
+}
+
 float airDensityFade(float t) {
     float fogStart = max(worldUBO.fogStart, 0.0);
     float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
@@ -393,6 +399,12 @@ float airDensityFade(float t) {
     float sunHeight = abs(celestialSunDirection().y);
     float baseDensity = mix(0.80, 0.50, smoothstep(0.05, 0.35, sunHeight));
     return mix(baseDensity, 1.0, smoothstep(fogStart, fogStart + rampLength, t));
+}
+
+float emissiveAirScatteringDensity(float t) {
+    float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
+    float visibleFogDensity = max(2.0 / fogRange, 0.004) * 0.35;
+    return visibleFogDensity * airDensityFade(t) * INV_4_PI;
 }
 
 vec3 segmentIntegral(vec3 sigmaT, vec3 segmentTransmittance, float stepLength) {
@@ -428,9 +440,14 @@ ivec2 selectFullResolutionOffset(ivec2 lowPixel, int downsampleFactor) {
     return ivec2(int(offsetSeed % factor), int((offsetSeed / factor) % factor));
 }
 
-float volumetricStepLength(float t, float endDistance) {
+float volumetricStepLength(float t, float endDistance, bool underwater) {
     float nearStep = max(ADV_VOLUMETRIC_LIGHT_NEAR_STEP_SIZE, 0.25);
     float farStep = max(ADV_VOLUMETRIC_LIGHT_FAR_STEP_SIZE, nearStep);
+
+    if (underwater) {
+        float waterStep = clamp(nearStep, 0.75, 3.0);
+        return min(waterStep, max(endDistance - t, 0.25));
+    }
 
     float growStart = min(24.0, endDistance * 0.30);
     float growEnd = max(growStart + 8.0, endDistance * 0.75);
@@ -459,8 +476,7 @@ void main() {
     ivec2 lowResolution = imageSize(volumetricLightRawImage);
     if (any(greaterThanEqual(lowPixel, lowResolution))) { return; }
 
-    if (worldUBO.skyType != 1 || skyUBO.cameraSubmersionType == 0 || skyUBO.cameraSubmersionType == 2 ||
-        skyUBO.hasBlindnessOrDarkness > 0) {
+    if (worldUBO.skyType != 1 || skyUBO.cameraSubmersionType == 2 || skyUBO.hasBlindnessOrDarkness > 0) {
         storeEmpty(lowPixel);
         return;
     }
@@ -513,7 +529,10 @@ void main() {
     vec3 rayDir;
     buildCameraRay(fullPixel, fullResolution, origin, rayDir);
 
-    float mediumMaxDistance = clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
+    bool underwater = skyUBO.cameraSubmersionType == 1;
+    float mediumMaxDistance =
+        underwater ? clamp(worldUBO.fogEnd * 1.5, 16.0, 96.0) :
+                     clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
     float endDistance = rayDistanceFromViewDepth(sampleLinearDepth, rayDir);
     if (endDistance >= INF_DISTANCE) { endDistance = mediumMaxDistance; }
     endDistance = min(endDistance, mediumMaxDistance);
@@ -529,7 +548,11 @@ void main() {
     float cosTheta = clamp(dot(rayDir, lightDir), -1.0, 1.0);
     vec3 sigmaS;
     vec3 sigmaT;
-    airMedium(cosTheta, sigmaS, sigmaT);
+    if (underwater) {
+        waterMedium(cosTheta, sigmaS, sigmaT);
+    } else {
+        airMedium(cosTheta, sigmaS, sigmaT);
+    }
 
     vec3 transmittance = vec3(1.0);
     vec3 radiance = vec3(0.0);
@@ -538,23 +561,28 @@ void main() {
     float marchT = 0.0;
     for (int i = 0; i < ADV_VOLUMETRIC_LIGHT_MAX_STEPS && marchT < endDistance; ++i) {
         float remainingDistance = endDistance - marchT;
-        float baseStepLength = volumetricStepLength(marchT, endDistance);
+        float baseStepLength = volumetricStepLength(marchT, endDistance, underwater);
         float stepLength = min(baseStepLength, remainingDistance);
         float jitter = clamp(0.5 + (rand(seed) - 0.5) * 0.70, 0.15, 0.85);
         float t = marchT + stepLength * jitter;
         vec3 position = origin + rayDir * t;
-        vec3 lightRadiance = sampleDirectionalLight(position, lightDir, insideBoat);
-        lightRadiance += sampleEmissiveVolumetricLight(position, rayDir, insideBoat, seed);
+        vec3 directionalRadiance = sampleDirectionalLight(position, lightDir, insideBoat);
+        vec3 emissiveRadiance = underwater ? vec3(0.0) :
+                                             sampleEmissiveVolumetricLight(position, rayDir, insideBoat, seed);
 
-        float densityScale = airDensityFade(t);
-        float shaftDistanceFade = 1.0 - smoothstep(mediumMaxDistance * 0.45, mediumMaxDistance, t);
-        float scatteringStrength = max(ADV_VOLUMETRIC_LIGHT_SCATTERING_STRENGTH, 0.0);
-        float extinctionScale = 0.45;
+        float densityScale = underwater ? 1.0 : airDensityFade(t);
+        float shaftDistanceFade = underwater ? 1.0 : 1.0 - smoothstep(mediumMaxDistance * 0.45, mediumMaxDistance, t);
+        float scatteringStrength = underwater ? 1.0 : max(ADV_VOLUMETRIC_LIGHT_SCATTERING_STRENGTH, 0.0);
+        float extinctionScale = underwater ? 1.0 : 0.45;
         vec3 localSigmaS = sigmaS * densityScale * scatteringStrength * shaftDistanceFade;
+        vec3 localEmissiveSigmaS =
+            underwater ? localSigmaS :
+                         vec3(emissiveAirScatteringDensity(t) * max(scatteringStrength, 1.0) * shaftDistanceFade);
         vec3 localSigmaT = sigmaT * densityScale * extinctionScale;
         vec3 segmentTransmittance = exp(-localSigmaT * stepLength);
         vec3 segment = segmentIntegral(localSigmaT, segmentTransmittance, stepLength);
-        radiance += transmittance * lightRadiance * localSigmaS * segment;
+        radiance += transmittance *
+                    (directionalRadiance * localSigmaS + emissiveRadiance * localEmissiveSigmaS) * segment;
         transmittance *= segmentTransmittance;
         marchT += stepLength;
 

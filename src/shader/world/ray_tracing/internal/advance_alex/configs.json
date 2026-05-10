@@ -144,6 +144,24 @@
             "define": "ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS"
         },
         {
+            "name": "render_pipeline.module.ray_tracing.attribute.emissive_volume_light_strength",
+            "type": "float_range:0.1-1.0",
+            "default_value": "0.10",
+            "define": "ADV_EMISSIVE_VOLUME_LIGHT_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.emissive_volume_light_samples",
+            "type": "int_range:1-8",
+            "default_value": "4",
+            "define": "ADV_EMISSIVE_VOLUME_LIGHT_SAMPLES"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.emissive_volume_light_fade_distance",
+            "type": "float_range:8.0-128.0",
+            "default_value": "32.0",
+            "define": "ADV_EMISSIVE_VOLUME_LIGHT_FADE_DISTANCE"
+        },
+        {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_inline_ray_query",
             "type": "bool",
             "default_value": "render_pipeline.true",
