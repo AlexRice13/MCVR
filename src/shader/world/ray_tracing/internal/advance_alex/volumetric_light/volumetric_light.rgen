@@ -378,7 +378,7 @@ vec3 sampleEmissiveVolumetricLight(vec3 position,
                                    inout uint seed) {
     if (ADV_ENABLE_RESTIR == 0 || ADV_VOLUMETRIC_FOG_EMISSIVE_BLOCKS == 0) { return vec3(0.0); }
 
-    uvec3 gridSize = uvec3(imageSize(volumetricLightRawImage), uint(max(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH, 1)));
+    uvec3 gridSize = volumetricRestirGridSizeFromFullResolution(imageSize(linearDepthImage));
     uvec3 coord;
     if (!volumetricRestirCoordFromPixelDistance(lowPixel, rayDistance, gridSize, coord)) {
         return sampleDirectEmissiveVolumetricLight(position, insideBoat, seed);
@@ -503,7 +503,7 @@ void main() {
     ivec2 lowResolution = imageSize(volumetricLightRawImage);
     if (any(greaterThanEqual(lowPixel, lowResolution))) { return; }
 
-    if (worldUBO.skyType != 1 || skyUBO.cameraSubmersionType == 2 || skyUBO.hasBlindnessOrDarkness > 0) {
+    if (skyUBO.cameraSubmersionType == 2 || skyUBO.hasBlindnessOrDarkness > 0) {
         storeEmpty(lowPixel);
         return;
     }
@@ -594,7 +594,7 @@ void main() {
         float jitter = clamp(0.5 + (rand(seed) - 0.5) * 0.70, 0.15, 0.85);
         float t = marchT + stepLength * jitter;
         vec3 position = origin + rayDir * t;
-        vec3 directionalRadiance = sampleDirectionalLight(position, lightDir, insideBoat);
+        vec3 directionalRadiance = worldUBO.skyType == 1 ? sampleDirectionalLight(position, lightDir, insideBoat) : vec3(0.0);
         float underwaterBrightnessScale = underwater ? 1.5 : 1.0;
         vec3 emissiveRadiance =
             sampleEmissiveVolumetricLight(position, rayDir, insideBoat, lowPixel, t, seed) * underwaterBrightnessScale;

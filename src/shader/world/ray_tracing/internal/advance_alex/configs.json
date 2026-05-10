@@ -157,9 +157,15 @@
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_grid_depth",
-            "type": "int_range:4-64",
-            "default_value": "16",
+            "type": "int_range:4-32",
+            "default_value": "12",
             "define": "ADV_VOLUMETRIC_RESTIR_GRID_DEPTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_downsample_factor",
+            "type": "int_range:1-16",
+            "default_value": "4",
+            "define": "ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR"
         },
         {
             "name": "render_pipeline.module.ray_tracing.attribute.volumetric_restir_initial_samples",
@@ -645,20 +651,20 @@
         {
             "name": "volumetric_restir_candidates",
             "type": "intermediate",
-            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 64",
+            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 48",
             "binding": 39
         },
         {
             "name": "volumetric_restir_reservoirs",
             "type": "intermediate",
-            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 64",
+            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 48",
             "binding": 40
         },
         {
             "name": "volumetric_restir_history",
             "type": "intermediate",
             "shared": true,
-            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 128",
+            "size": "((RENDER_WIDTH + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR) * ((RENDER_HEIGHT + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR) * ADV_VOLUMETRIC_RESTIR_GRID_DEPTH * 96",
             "binding": 41
         }
     ],
@@ -1096,8 +1102,8 @@
             "definitions": {
                 "ADV_VOLUMETRIC_RESTIR_PASS": "0"
             },
-            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
-            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR + 3) / 4",
             "gz": "(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH + 3) / 4"
         },
         {
@@ -1122,8 +1128,8 @@
             "definitions": {
                 "ADV_VOLUMETRIC_RESTIR_PASS": "1"
             },
-            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
-            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gx": "((RENDER_WIDTH + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR + 3) / 4",
+            "gy": "((RENDER_HEIGHT + ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR - 1) / ADV_VOLUMETRIC_RESTIR_DOWNSAMPLE_FACTOR + 3) / 4",
             "gz": "(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH + 3) / 4"
         },
         {

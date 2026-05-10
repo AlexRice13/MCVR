@@ -40,10 +40,7 @@ layout(set = 3, binding = 5, r16f) uniform readonly image2D linearDepthImage;
 
 uvec3 volumetricRestirGridSize() {
     ivec2 fullResolution = imageSize(linearDepthImage);
-    uint downsample = max(uint(ADV_VOLUMETRIC_LIGHT_DOWNSAMPLE_FACTOR), 1u);
-    return uvec3((uint(fullResolution.x) + downsample - 1u) / downsample,
-                 (uint(fullResolution.y) + downsample - 1u) / downsample,
-                 uint(max(ADV_VOLUMETRIC_RESTIR_GRID_DEPTH, 1)));
+    return volumetricRestirGridSizeFromFullResolution(fullResolution);
 }
 
 bool sampleVolumetricRestirLightSource(uint centerChunkIndex,

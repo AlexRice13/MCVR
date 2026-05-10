@@ -1776,7 +1776,7 @@ void main() {
         specHitDepth = isFirstHitSpecular ? (hasSecondHit ? distFirstToSecond : INF_DISTANCE) : 0.0;
     }
     bool underwaterVolumetric = skyUBO.cameraSubmersionType == 1;
-    bool applyVolumetricCompose = useVolumetricFog && !raySkipFog(mainRay) && worldUBO.skyType == 1;
+    bool applyVolumetricCompose = useVolumetricFog && !raySkipFog(mainRay);
     if (applyVolumetricCompose && (primarySurfaceCache.valid || hitSky)) {
         float volumetricDistance =
             psrHitSky ? volumetricMediumMaxDistance(underwaterVolumetric) : length(psrHitPosition - eyePos);
