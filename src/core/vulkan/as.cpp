@@ -422,6 +422,14 @@ vk::TLASBuilder::TLASInstanceBuilder::defineInstance(VkTransformMatrixKHR transf
 
 std::shared_ptr<vk::TLASBuilder>
 vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device> device, std::shared_ptr<VMA> vma) {
+    std::shared_ptr<DeviceLocalBuffer> reusableInstanceBuffer;
+    return endInstanceBuilder(device, vma, reusableInstanceBuffer);
+}
+
+std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(
+    std::shared_ptr<Device> device,
+    std::shared_ptr<VMA> vma,
+    std::shared_ptr<DeviceLocalBuffer> &reusableInstanceBuffer) {
     std::vector<VkAccelerationStructureInstanceKHR> asInstances(instances.size());
     for (int i = 0; i < instances.size(); i++) {
         asInstances[i].transform = std::get<0>(instances[i]);
@@ -432,11 +440,17 @@ vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device>
         asInstances[i].accelerationStructureReference = std::get<5>(instances[i])->blasDeviceAddress();
     }
 
-    instanceBuffer = DeviceLocalBuffer::create(
-        vma, device, false, sizeof(VkAccelerationStructureInstanceKHR) * instances.size(),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-        0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 16);
-    instanceBuffer->uploadToStagingBuffer(asInstances.data());
+    const VkDeviceSize instanceBufferSize = sizeof(VkAccelerationStructureInstanceKHR) * instances.size();
+    instanceUploadSize = instanceBufferSize;
+    if (reusableInstanceBuffer == nullptr || reusableInstanceBuffer->size() < instanceBufferSize) {
+        reusableInstanceBuffer = DeviceLocalBuffer::create(
+            vma, device, false, instanceBufferSize,
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+            0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 16);
+    }
+    instanceBuffer = reusableInstanceBuffer;
+    instanceBuffer->uploadToStagingBuffer(asInstances.data(), instanceUploadSize, 0);
 
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -458,6 +472,8 @@ vk::TLASBuilder::TLASBuilder::TLASInstanceBuilder &vk::TLASBuilder::beginInstanc
 std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags) {
     mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     flags_ = flags;
+    srcTLASObject_ = nullptr;
+    srcTLAS_ = VK_NULL_HANDLE;
     return shared_from_this();
 }
 
@@ -466,6 +482,16 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineUpdateProperty(VkBuildAc
     mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
     flags_ = flags;
     srcTLAS_ = srcTLAS;
+    srcTLASObject_ = nullptr;
+    return shared_from_this();
+}
+
+std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags,
+                                                                       std::shared_ptr<TLAS> srcTLAS) {
+    mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    flags_ = flags;
+    srcTLASObject_ = srcTLAS;
+    srcTLAS_ = srcTLAS != nullptr ? srcTLAS->tlas() : VK_NULL_HANDLE;
     return shared_from_this();
 }
 
@@ -486,26 +512,45 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::querySizeInfo(std::shared_ptr<
 }
 
 std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
-                                                                  std::shared_ptr<Device> device,
-                                                                  std::shared_ptr<VMA> vma) {
-    tlasBuffer_ = DeviceLocalBuffer::create(vma, device, false, sizeInfo_.accelerationStructureSize,
-                                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                            0, VMA_MEMORY_USAGE_GPU_ONLY, 256);
+                                                                   std::shared_ptr<Device> device,
+                                                                   std::shared_ptr<VMA> vma) {
+    std::shared_ptr<DeviceLocalBuffer> reusableScratchBuffer;
+    return allocateBuffers(physicalDevice, device, vma, reusableScratchBuffer);
+}
 
-    scratchBuffer_ = DeviceLocalBuffer::create(
-        vma, device, false,
-        mode_ == VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR ? sizeInfo_.buildScratchSize :
-                                                                  sizeInfo_.updateScratchSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0, VMA_MEMORY_USAGE_GPU_ONLY,
-        physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
+std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(
+    std::shared_ptr<PhysicalDevice> physicalDevice,
+    std::shared_ptr<Device> device,
+    std::shared_ptr<VMA> vma,
+    std::shared_ptr<DeviceLocalBuffer> &reusableScratchBuffer) {
+    if (mode_ == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR && srcTLASObject_ != nullptr) {
+        tlasBuffer_ = srcTLASObject_->tlasBuffer();
+        dstTLAS_ = srcTLASObject_->tlas();
+    } else {
+        tlasBuffer_ = DeviceLocalBuffer::create(vma, device, false, sizeInfo_.accelerationStructureSize,
+                                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                                                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                0, VMA_MEMORY_USAGE_GPU_ONLY, 256);
+    }
+
+    const VkDeviceSize scratchSize = mode_ == VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR ?
+                                         sizeInfo_.buildScratchSize :
+                                         sizeInfo_.updateScratchSize;
+    if (reusableScratchBuffer == nullptr || reusableScratchBuffer->size() < scratchSize) {
+        reusableScratchBuffer = DeviceLocalBuffer::create(
+            vma, device, false, scratchSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
+    }
+    scratchBuffer_ = reusableScratchBuffer;
 
     return shared_from_this();
 }
 
 std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device> device,
                                                           std::shared_ptr<CommandBuffer> commandBuffer) {
-    tlasInstanceBuilder_.instanceBuffer->uploadToBuffer(commandBuffer);
+    tlasInstanceBuilder_.instanceBuffer->uploadToBuffer(commandBuffer, tlasInstanceBuilder_.instanceUploadSize, 0, 0);
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> bufferBarriers{{
         .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -517,15 +562,19 @@ std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device
     }};
     commandBuffer->barriersBufferImage(bufferBarriers, {});
 
-    VkAccelerationStructureCreateInfoKHR tlasCreateInfo{};
-    tlasCreateInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
-    tlasCreateInfo.buffer = tlasBuffer_->vkBuffer();
-    tlasCreateInfo.size = sizeInfo_.accelerationStructureSize;
-    tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    if (mode_ == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR && srcTLASObject_ != nullptr) {
+        dstTLAS_ = srcTLASObject_->tlas();
+    } else {
+        VkAccelerationStructureCreateInfoKHR tlasCreateInfo{};
+        tlasCreateInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        tlasCreateInfo.buffer = tlasBuffer_->vkBuffer();
+        tlasCreateInfo.size = sizeInfo_.accelerationStructureSize;
+        tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 
-    if (vkCreateAccelerationStructureKHR(device->vkDevice(), &tlasCreateInfo, nullptr, &dstTLAS_) != VK_SUCCESS) {
-        std::cout << "Cannot create TLAS" << std::endl;
-        exit(EXIT_FAILURE);
+        if (vkCreateAccelerationStructureKHR(device->vkDevice(), &tlasCreateInfo, nullptr, &dstTLAS_) != VK_SUCCESS) {
+            std::cout << "Cannot create TLAS" << std::endl;
+            exit(EXIT_FAILURE);
+        }
     }
 
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
@@ -547,5 +596,8 @@ std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device
     const VkAccelerationStructureBuildRangeInfoKHR *pBuildRanges = &buildRanges;
     vkCmdBuildAccelerationStructuresKHR(commandBuffer->vkCommandBuffer(), 1, &buildInfo, &pBuildRanges);
 
+    if (mode_ == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR && srcTLASObject_ != nullptr) {
+        return srcTLASObject_;
+    }
     return TLAS::create(device, dstTLAS_, tlasBuffer_);
 }

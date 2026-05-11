@@ -1,5 +1,6 @@
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 
+#include "common/hit_group_registry.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
@@ -22,6 +23,21 @@
 #include <stdexcept>
 
 using json = nlohmann::json;
+
+static void refreshHitGroupIdToIndex(RayTracingPass &pass) {
+    const auto registeredNames = mcvr::HitGroupRegistry::namesSnapshot();
+    if (pass.hitGroupIdToIndex.size() == registeredNames.size()) { return; }
+
+    pass.hitGroupIdToIndex.assign(registeredNames.size(), pass.fallbackHitGroupIndex);
+    uint64_t hash = 1469598103934665603ull;
+    for (uint32_t id = 0; id < registeredNames.size(); id++) {
+        auto iter = pass.hitGroupNameToIndex.find(registeredNames[id]);
+        if (iter != pass.hitGroupNameToIndex.end()) { pass.hitGroupIdToIndex[id] = iter->second; }
+        hash ^= pass.hitGroupIdToIndex[id] + 0x9e3779b9u;
+        hash *= 1099511628211ull;
+    }
+    pass.hitGroupIdToIndexHash = hash;
+}
 
 std::filesystem::path RayTracingModule::builtInShaderPackPath() {
     return Renderer::folderPath / "shaders/world/ray_tracing/vanilla-pt.zip";
@@ -962,6 +978,8 @@ RayTracingModule::collectRayTracingPassShaderRequests(
     pass.missShaders.clear();
     pass.hitShaderGroups.clear();
     pass.hitGroupNameToIndex.clear();
+    pass.hitGroupIdToIndex.clear();
+    pass.hitGroupIdToIndexHash = 0;
     pass.shadowHitGroupIndex = 0;
     pass.fallbackHitGroupIndex = 0;
     pass.missGroupCount = 0;
@@ -1356,9 +1374,10 @@ void RayTracingModule::renderRayTracingPass(
 
     if (context.worldPrepareContext->tlas == nullptr) { return; }
 
+    refreshHitGroupIdToIndex(pass);
     context.worldPrepareContext->setupHitGroupSbt(
-        pass.hitGroupNameToIndex, pass.fallbackHitGroupIndex, pass.shadowHitGroupIndex, worldCommandBuffer,
-        nullptr, pass.querySbts[frameIndex]);
+        &pass, pass.hitGroupIdToIndex, pass.hitGroupIdToIndexHash, pass.fallbackHitGroupIndex,
+        pass.shadowHitGroupIndex, worldCommandBuffer, nullptr, pass.querySbts[frameIndex]);
 
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> bufferBarriers;
     std::vector<vk::CommandBuffer::ImageMemoryBarrier> imageBarriers;
@@ -1412,9 +1431,10 @@ void RayTracingModule::renderSharcUpdateAndResolve(
         throw std::runtime_error("invalid sharc update pass state: " + pass.config.name);
     }
 
+    refreshHitGroupIdToIndex(pass);
     context.worldPrepareContext->setupHitGroupSbt(
-        pass.hitGroupNameToIndex, pass.fallbackHitGroupIndex, pass.shadowHitGroupIndex, worldCommandBuffer,
-        pass.updateSbts[frameIndex], nullptr);
+        &pass, pass.hitGroupIdToIndex, pass.hitGroupIdToIndexHash, pass.fallbackHitGroupIndex,
+        pass.shadowHitGroupIndex, worldCommandBuffer, pass.updateSbts[frameIndex], nullptr);
 
     updateSharcConfig(frameIndex);
     context.rayTracingDescriptorTable->bindBuffer(sharcConfigBuffers_[frameIndex], 4, 0);

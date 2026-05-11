@@ -59,7 +59,14 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::DeviceLocalBuffer> lastIndexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastPositionBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastObjToWorldMat;
+    std::shared_ptr<vk::DeviceLocalBuffer> tlasInstanceBuffer;
+    std::shared_ptr<vk::DeviceLocalBuffer> tlasScratchBuffer;
+    uint32_t previousTlasInstanceCount = 0;
     std::vector<uint32_t> hitGroupNameIds;
+    uint64_t hitGroupNameIdsHash = 0;
+    size_t previousHitGroupNameCount = 0;
+    size_t previousGeometryAddressCount = 0;
+    size_t previousTlasInstanceReserve = 0;
 
     struct CachedChunkRow {
         std::shared_ptr<Chunk1> chunk;
@@ -80,6 +87,16 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     };
     std::vector<CachedChunkRow> cachedChunkRows;
 
+    struct CachedSbtHitGroupIndices {
+        size_t hitGroupCount = 0;
+        uint64_t hitGroupHash = 0;
+        uint64_t passMapHash = 0;
+        uint32_t fallbackHitGroupIndex = 0;
+        uint32_t shadowHitGroupIndex = 0;
+        std::vector<uint32_t> indices;
+    };
+    std::unordered_map<const void *, CachedSbtHitGroupIndices> cachedSbtHitGroupIndices;
+
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
 
     void uploadBuffer(std::vector<uint32_t> &blasOffsets,
@@ -89,12 +106,14 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
                       std::vector<uint64_t> &lastIndexBufferAddrs,
                       std::vector<uint64_t> &lastPositionBufferAddrs,
                       std::vector<glm::mat4> &lastObjToWorldMats);
-    void setupHitGroupSbt(const std::unordered_map<std::string, uint32_t> &hitGroupNameToIndex,
+    void setupHitGroupSbt(const void *passKey,
+                          const std::vector<uint32_t> &hitGroupIdToIndex,
+                          uint64_t hitGroupIdToIndexHash,
                           uint32_t fallbackHitGroupIndex,
                           uint32_t shadowHitGroupIndex,
                           std::shared_ptr<vk::CommandBuffer> commandBuffer,
-                           std::shared_ptr<vk::SBT> updateSbt,
-                           std::shared_ptr<vk::SBT> querySbt);
+                          std::shared_ptr<vk::SBT> updateSbt,
+                          std::shared_ptr<vk::SBT> querySbt);
     CachedChunkRow &refreshCachedChunkRow(size_t index, const std::shared_ptr<Chunk1> &chunk);
     void render();
 };

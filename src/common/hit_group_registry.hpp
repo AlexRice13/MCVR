@@ -43,6 +43,12 @@ class HitGroupRegistry {
         return state.names;
     }
 
+    static size_t nameCount() {
+        auto &state = registryState();
+        std::lock_guard lock(state.mutex);
+        return state.names.size();
+    }
+
   private:
     struct State {
         std::mutex mutex;

@@ -10,8 +10,18 @@
 #include "core/render/renderer.hpp"
 #include "core/render/world.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <glm/gtc/type_ptr.hpp>
+
+static uint64_t hashHitGroupIds(const std::vector<uint32_t> &ids) {
+    uint64_t hash = 1469598103934665603ull;
+    for (uint32_t id : ids) {
+        hash ^= id + 0x9e3779b9u;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
 
 WorldPrepare::WorldPrepare() {}
 
@@ -222,8 +232,20 @@ void WorldPrepareContext::render() {
     std::vector<uint64_t> lastPositionBufferAddrs;
     std::vector<glm::mat4> lastObjToWorldMats;
 
+    if (previousHitGroupNameCount > 0) { hitGroupNameIds.reserve(previousHitGroupNameCount); }
+    if (previousGeometryAddressCount > 0) {
+        blasOffset.reserve(previousTlasInstanceReserve);
+        indexBufferAddrs.reserve(previousGeometryAddressCount);
+        positionBufferAddrs.reserve(previousGeometryAddressCount);
+        materialBufferAddrs.reserve(previousGeometryAddressCount);
+        lastIndexBufferAddrs.reserve(previousGeometryAddressCount);
+        lastPositionBufferAddrs.reserve(previousGeometryAddressCount);
+        lastObjToWorldMats.reserve(previousTlasInstanceReserve);
+    }
+
     tlasBuilder = vk::TLASBuilder::create();
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
+    if (previousTlasInstanceReserve > 0) { instanceBuilder.instances.reserve(previousTlasInstanceReserve); }
     int blasIndex = 0;
     uint32_t entityInstanceCount = 0;
     uint32_t chunkInstanceCount = 0;
@@ -386,21 +408,22 @@ void WorldPrepareContext::render() {
             instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunkRow.blas);
 
             hitGroupNameIds.push_back(mcvr::HitGroupRegistry::shadowId());
-            for (int j = 0; j < chunkRow.geometryCount; j++) {
-                if (chunkRow.geometryGroupIds != nullptr && j < static_cast<int>(chunkRow.geometryGroupIds->size())) {
-                    hitGroupNameIds.push_back((*chunkRow.geometryGroupIds)[j]);
-                } else {
-                    hitGroupNameIds.push_back(mcvr::HitGroupRegistry::defaultId());
-                }
+            if (chunkRow.geometryGroupIds != nullptr && chunkRow.geometryGroupIds->size() >= chunkRow.geometryCount) {
+                auto begin = chunkRow.geometryGroupIds->begin();
+                hitGroupNameIds.insert(hitGroupNameIds.end(), begin, begin + chunkRow.geometryCount);
+            } else {
+                hitGroupNameIds.resize(hitGroupNameIds.size() + chunkRow.geometryCount,
+                                       mcvr::HitGroupRegistry::defaultId());
             }
 
-            for (int j = 0; j < chunkRow.geometryCount; j++) {
-                indexBufferAddrs.push_back((*chunkRow.indexBufferAddresses)[j]);
-                positionBufferAddrs.push_back((*chunkRow.positionBufferAddresses)[j]);
-                materialBufferAddrs.push_back((*chunkRow.materialBufferAddresses)[j]);
-                lastIndexBufferAddrs.push_back(0);
-                lastPositionBufferAddrs.push_back(0);
-            }
+            indexBufferAddrs.insert(indexBufferAddrs.end(), chunkRow.indexBufferAddresses->begin(),
+                                    chunkRow.indexBufferAddresses->begin() + chunkRow.geometryCount);
+            positionBufferAddrs.insert(positionBufferAddrs.end(), chunkRow.positionBufferAddresses->begin(),
+                                       chunkRow.positionBufferAddresses->begin() + chunkRow.geometryCount);
+            materialBufferAddrs.insert(materialBufferAddrs.end(), chunkRow.materialBufferAddresses->begin(),
+                                      chunkRow.materialBufferAddresses->begin() + chunkRow.geometryCount);
+            lastIndexBufferAddrs.resize(lastIndexBufferAddrs.size() + chunkRow.geometryCount, 0);
+            lastPositionBufferAddrs.resize(lastPositionBufferAddrs.size() + chunkRow.geometryCount, 0);
 
             {
                 glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
@@ -428,19 +451,39 @@ void WorldPrepareContext::render() {
     RAD_PROFILE_COUNTER("world_prepare.entity_instances", entityInstanceCount);
     RAD_PROFILE_COUNTER("world_prepare.hit_group_names", hitGroupNameIds.size());
     RAD_PROFILE_COUNTER("world_prepare.tlas_instances", instanceBuilder.instances.size());
+    hitGroupNameIdsHash = hashHitGroupIds(hitGroupNameIds);
+    previousHitGroupNameCount = hitGroupNameIds.size();
+    previousGeometryAddressCount = indexBufferAddrs.size();
+    previousTlasInstanceReserve = instanceBuilder.instances.size();
 
     if (instanceBuilder.instances.empty()) {
         tlas = nullptr;
+        previousTlasInstanceCount = 0;
         return;
     }
 
     {
         RAD_PROFILE_SCOPE("world_prepare.tlas_build");
-        tlas = instanceBuilder.endInstanceBuilder(device, vma)
-                   ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
-                   ->querySizeInfo(device)
-                   ->allocateBuffers(physicalDevice, device, vma)
-                   ->buildAndSubmit(device, worldCommandBuffer);
+        const uint32_t instanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
+        const bool canUpdate = tlas != nullptr && previousTlasInstanceCount == instanceCount;
+        const VkBuildAccelerationStructureFlagsKHR flags =
+            VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+            VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+        auto builder = instanceBuilder.endInstanceBuilder(device, vma, tlasInstanceBuffer);
+        if (canUpdate) {
+            RAD_PROFILE_COUNTER("world_prepare.tlas_update", 1);
+            tlas = builder->defineUpdateProperty(flags, tlas)
+                       ->querySizeInfo(device)
+                       ->allocateBuffers(physicalDevice, device, vma, tlasScratchBuffer)
+                       ->buildAndSubmit(device, worldCommandBuffer);
+        } else {
+            RAD_PROFILE_COUNTER("world_prepare.tlas_full_build", 1);
+            tlas = builder->defineBuildProperty(flags)
+                       ->querySizeInfo(device)
+                       ->allocateBuffers(physicalDevice, device, vma, tlasScratchBuffer)
+                       ->buildAndSubmit(device, worldCommandBuffer);
+        }
+        previousTlasInstanceCount = instanceCount;
     }
 
     {
@@ -460,36 +503,53 @@ void WorldPrepareContext::render() {
     }
 }
 
-void WorldPrepareContext::setupHitGroupSbt(const std::unordered_map<std::string, uint32_t> &hitGroupNameToIndex,
+void WorldPrepareContext::setupHitGroupSbt(const void *passKey,
+                                           const std::vector<uint32_t> &hitGroupIdToIndex,
+                                           uint64_t hitGroupIdToIndexHash,
                                            uint32_t fallbackHitGroupIndex,
                                            uint32_t shadowHitGroupIndex,
                                            std::shared_ptr<vk::CommandBuffer> commandBuffer,
                                            std::shared_ptr<vk::SBT> updateSbt,
                                            std::shared_ptr<vk::SBT> querySbt) {
     RAD_PROFILE_SCOPE("world_prepare.setup_hit_group_sbt");
-    std::vector<uint32_t> hitGroupIndices;
-    hitGroupIndices.reserve(hitGroupNameIds.size());
+    std::vector<uint32_t> *hitGroupIndices = nullptr;
+    CachedSbtHitGroupIndices localCache;
+    auto &cache = passKey != nullptr ? cachedSbtHitGroupIndices[passKey] : localCache;
+    const bool cacheHit = cache.hitGroupCount == hitGroupNameIds.size() &&
+                          cache.hitGroupHash == hitGroupNameIdsHash &&
+                          cache.passMapHash == hitGroupIdToIndexHash &&
+                          cache.fallbackHitGroupIndex == fallbackHitGroupIndex &&
+                          cache.shadowHitGroupIndex == shadowHitGroupIndex;
 
-    {
-        RAD_PROFILE_SCOPE("world_prepare.resolve_hit_group_names");
-        const auto registeredNames = mcvr::HitGroupRegistry::namesSnapshot();
+    if (cacheHit) {
+        RAD_PROFILE_COUNTER("world_prepare.sbt_indices_cache_hit", 1);
+        hitGroupIndices = &cache.indices;
+    } else {
+        RAD_PROFILE_COUNTER("world_prepare.sbt_indices_cache_miss", 1);
+        RAD_PROFILE_SCOPE("world_prepare.resolve_hit_group_ids");
+        cache.hitGroupCount = hitGroupNameIds.size();
+        cache.hitGroupHash = hitGroupNameIdsHash;
+        cache.passMapHash = hitGroupIdToIndexHash;
+        cache.fallbackHitGroupIndex = fallbackHitGroupIndex;
+        cache.shadowHitGroupIndex = shadowHitGroupIndex;
+        cache.indices.clear();
+        cache.indices.reserve(hitGroupNameIds.size());
         for (const uint32_t groupId : hitGroupNameIds) {
             if (groupId == mcvr::HitGroupRegistry::shadowId()) {
-                hitGroupIndices.push_back(shadowHitGroupIndex);
+                cache.indices.push_back(shadowHitGroupIndex);
                 continue;
             }
 
-            if (groupId >= registeredNames.size()) {
-                hitGroupIndices.push_back(fallbackHitGroupIndex);
+            if (groupId >= hitGroupIdToIndex.size()) {
+                cache.indices.push_back(fallbackHitGroupIndex);
                 continue;
             }
 
-            const std::string &groupName = registeredNames[groupId];
-            auto iter = hitGroupNameToIndex.find(groupName);
-            hitGroupIndices.push_back(iter == hitGroupNameToIndex.end() ? fallbackHitGroupIndex : iter->second);
+            cache.indices.push_back(hitGroupIdToIndex[groupId]);
         }
+        hitGroupIndices = &cache.indices;
     }
 
-    if (updateSbt != nullptr) { updateSbt->setupHitSBT(hitGroupIndices, commandBuffer); }
-    if (querySbt != nullptr) { querySbt->setupHitSBT(hitGroupIndices, commandBuffer); }
+    if (updateSbt != nullptr) { updateSbt->setupHitSBT(*hitGroupIndices, commandBuffer); }
+    if (querySbt != nullptr) { querySbt->setupHitSBT(*hitGroupIndices, commandBuffer); }
 }

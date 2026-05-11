@@ -486,6 +486,8 @@ struct RayTracingPass {
     std::vector<MissShader> missShaders;
     std::vector<HitShaderGroup> hitShaderGroups;
     std::unordered_map<std::string, uint32_t> hitGroupNameToIndex;
+    std::vector<uint32_t> hitGroupIdToIndex;
+    uint64_t hitGroupIdToIndexHash = 0;
     uint32_t shadowHitGroupIndex = 0;
     uint32_t fallbackHitGroupIndex = 0;
     uint32_t missGroupCount = 0;
