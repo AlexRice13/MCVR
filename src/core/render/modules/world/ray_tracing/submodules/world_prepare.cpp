@@ -89,62 +89,61 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto cmdBuffer = context->worldCommandBuffer;
 
-    blasOffsetsBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, blasOffsets.size() * sizeof(uint32_t),
+    constexpr VkBufferUsageFlags metadataUsage =
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data());
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    auto ensureMetadataBuffer = [&](std::shared_ptr<vk::DeviceLocalBuffer> &buffer, size_t requiredBytes) {
+        if (buffer == nullptr || buffer->size() < requiredBytes) {
+            buffer = vk::DeviceLocalBuffer::create(vma, device, requiredBytes, metadataUsage);
+        }
+    };
 
-    indexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, indexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data());
+    const size_t blasOffsetsBytes = blasOffsets.size() * sizeof(uint32_t);
+    ensureMetadataBuffer(blasOffsetsBuffer, blasOffsetsBytes);
+    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data(), blasOffsetsBytes, 0);
 
-    positionBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, positionBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    positionBufferAddr->uploadToStagingBuffer(positionBufferAddrs.data());
+    const size_t indexBufferBytes = indexBufferAddrs.size() * sizeof(uint64_t);
+    ensureMetadataBuffer(indexBufferAddr, indexBufferBytes);
+    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data(), indexBufferBytes, 0);
 
-    materialBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, materialBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    materialBufferAddr->uploadToStagingBuffer(materialBufferAddrs.data());
+    const size_t positionBufferBytes = positionBufferAddrs.size() * sizeof(uint64_t);
+    ensureMetadataBuffer(positionBufferAddr, positionBufferBytes);
+    positionBufferAddr->uploadToStagingBuffer(positionBufferAddrs.data(), positionBufferBytes, 0);
 
-    lastIndexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, lastIndexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data());
+    const size_t materialBufferBytes = materialBufferAddrs.size() * sizeof(uint64_t);
+    ensureMetadataBuffer(materialBufferAddr, materialBufferBytes);
+    materialBufferAddr->uploadToStagingBuffer(materialBufferAddrs.data(), materialBufferBytes, 0);
 
-    lastPositionBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, lastPositionBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastPositionBufferAddr->uploadToStagingBuffer(lastPositionBufferAddrs.data());
+    const size_t lastIndexBufferBytes = lastIndexBufferAddrs.size() * sizeof(uint64_t);
+    ensureMetadataBuffer(lastIndexBufferAddr, lastIndexBufferBytes);
+    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data(), lastIndexBufferBytes, 0);
 
-    lastObjToWorldMat = vk::DeviceLocalBuffer::create(
-        vma, device, lastObjToWorldMats.size() * sizeof(glm::mat4),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data());
+    const size_t lastPositionBufferBytes = lastPositionBufferAddrs.size() * sizeof(uint64_t);
+    ensureMetadataBuffer(lastPositionBufferAddr, lastPositionBufferBytes);
+    lastPositionBufferAddr->uploadToStagingBuffer(lastPositionBufferAddrs.data(), lastPositionBufferBytes, 0);
 
-    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
-        blasOffsetsBuffer,
-        indexBufferAddr,
-        positionBufferAddr,
-        materialBufferAddr,
-        lastIndexBufferAddr,
-        lastPositionBufferAddr,
-        lastObjToWorldMat,
+    const size_t lastObjToWorldBytes = lastObjToWorldMats.size() * sizeof(glm::mat4);
+    ensureMetadataBuffer(lastObjToWorldMat, lastObjToWorldBytes);
+    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data(), lastObjToWorldBytes, 0);
+
+    struct MetadataUpload {
+        std::shared_ptr<vk::DeviceLocalBuffer> buffer;
+        size_t bytes = 0;
+    };
+    std::vector<MetadataUpload> rayTracingMetaData{{
+        {blasOffsetsBuffer, blasOffsetsBytes},
+        {indexBufferAddr, indexBufferBytes},
+        {positionBufferAddr, positionBufferBytes},
+        {materialBufferAddr, materialBufferBytes},
+        {lastIndexBufferAddr, lastIndexBufferBytes},
+        {lastPositionBufferAddr, lastPositionBufferBytes},
+        {lastObjToWorldMat, lastObjToWorldBytes},
     }};
 
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> uploadPreBufferBarriers, uploadPostBufferBarriers;
 
-    for (auto buffer : rayTracingMetaData) {
-        if (buffer == nullptr) continue;
+    for (auto &upload : rayTracingMetaData) {
+        if (upload.buffer == nullptr || upload.bytes == 0) continue;
         uploadPreBufferBarriers.push_back({
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
@@ -152,7 +151,7 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
             .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
-            .buffer = buffer,
+            .buffer = upload.buffer,
         });
         uploadPostBufferBarriers.push_back({
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -163,14 +162,14 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
             .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
-            .buffer = buffer,
+            .buffer = upload.buffer,
         });
     }
 
     cmdBuffer->barriersBufferImage(uploadPreBufferBarriers, {});
-    for (auto buffer : rayTracingMetaData) {
-        if (buffer == nullptr) continue;
-        buffer->uploadToBuffer(cmdBuffer);
+    for (auto &upload : rayTracingMetaData) {
+        if (upload.buffer == nullptr || upload.bytes == 0) continue;
+        upload.buffer->uploadToBuffer(cmdBuffer, upload.bytes, 0, 0);
     }
     cmdBuffer->barriersBufferImage(uploadPostBufferBarriers, {});
 }

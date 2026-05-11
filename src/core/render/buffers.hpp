@@ -22,6 +22,10 @@ class Buffers : public SharedObject<Buffers> {
     void buildIndexBuffer(uint32_t dstId, int type, int drawMode, int vertexCount, int expectedIndexCount);
     void queueOverlayUpload(uint8_t *srcPointer, uint32_t dstId);
     void queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> buffer);
+    void queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> buffer,
+                                   size_t size,
+                                   size_t srcOffset,
+                                   size_t dstOffset);
     void queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer,
                                    std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer);
     void performQueuedUpload();
@@ -88,7 +92,13 @@ class Buffers : public SharedObject<Buffers> {
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> exposureDataBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> cloudCoverageBuffer_;
 
-    std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> importantIndexVertexBuffer_;
+    struct ImportantWorldUpload {
+        std::shared_ptr<vk::DeviceLocalBuffer> buffer;
+        size_t size = 0;
+        size_t srcOffset = 0;
+        size_t dstOffset = 0;
+    };
+    std::shared_ptr<std::vector<ImportantWorldUpload>> importantIndexVertexBuffer_;
 
     bool useJitter_ = true;
     std::recursive_mutex mtx_;

@@ -101,7 +101,7 @@ void Buffers::resetFrame() {
     overlayNextID_ = 0;
 
     frr.retain(importantIndexVertexBuffer_);
-    importantIndexVertexBuffer_ = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>();
+    importantIndexVertexBuffer_ = std::make_shared<std::vector<ImportantWorldUpload>>();
 
     overlayDrawUniformData_[context->frameIndex].clear();
     overlayDrawUniformWriteOffset_[context->frameIndex] = 0;
@@ -211,9 +211,18 @@ void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> v
 }
 
 void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> buffer) {
+    if (buffer == nullptr) return;
+    queueImportantWorldUpload(buffer, buffer->size(), 0, 0);
+}
+
+void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> buffer,
+                                        size_t size,
+                                        size_t srcOffset,
+                                        size_t dstOffset) {
     std::unique_lock<std::recursive_mutex> lck(mtx_);
     if (buffer == nullptr) return;
-    importantIndexVertexBuffer_->push_back(buffer);
+    if (size == 0) return;
+    importantIndexVertexBuffer_->push_back({buffer, size, srcOffset, dstOffset});
 }
 
 void Buffers::performQueuedUpload() {
@@ -250,7 +259,7 @@ void Buffers::performQueuedUpload() {
         });
     }
 
-    for (auto buffer : *importantIndexVertexBuffer_) {
+    for (const auto &upload : *importantIndexVertexBuffer_) {
         uploadPreBufferBarriers.push_back({
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
@@ -258,7 +267,7 @@ void Buffers::performQueuedUpload() {
             .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
-            .buffer = buffer,
+            .buffer = upload.buffer,
         });
         uploadPostBufferBarriers.push_back({
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -270,7 +279,7 @@ void Buffers::performQueuedUpload() {
             .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
-            .buffer = buffer,
+            .buffer = upload.buffer,
         });
     }
 
@@ -281,7 +290,9 @@ void Buffers::performQueuedUpload() {
         if (size > 0) { buffer->uploadToBuffer(cmdBuffer, size, 0, 0); }
     }
 
-    for (auto buffer : *importantIndexVertexBuffer_) { buffer->uploadToBuffer(cmdBuffer); }
+    for (const auto &upload : *importantIndexVertexBuffer_) {
+        upload.buffer->uploadToBuffer(cmdBuffer, upload.size, upload.srcOffset, upload.dstOffset);
+    }
 
     cmdBuffer->barriersBufferImage(uploadPostBufferBarriers, {});
 }

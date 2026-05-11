@@ -227,6 +227,22 @@ static void storeChunkPackedData(std::vector<ChunkPackedData> &chunkPackedData,
     chunkPackedData[id] = makeChunkPackedData(x, y, z, geometryCount, lightCount, lightBufferAddress);
 }
 
+static void markChunkPackedDataDirty(std::vector<size_t> &dirtyBegin, std::vector<size_t> &dirtyEnd, size_t id) {
+    for (size_t i = 0; i < dirtyBegin.size() && i < dirtyEnd.size(); i++) {
+        dirtyBegin[i] = std::min(dirtyBegin[i], id);
+        dirtyEnd[i] = std::max(dirtyEnd[i], id + 1);
+    }
+}
+
+static void markAllChunkPackedDataDirty(std::vector<size_t> &dirtyBegin,
+                                        std::vector<size_t> &dirtyEnd,
+                                        size_t chunkCount) {
+    for (size_t i = 0; i < dirtyBegin.size() && i < dirtyEnd.size(); i++) {
+        dirtyBegin[i] = 0;
+        dirtyEnd[i] = chunkCount;
+    }
+}
+
 static LightData packLight(const LightInfo &light, const glm::vec3 &chunkOrigin) {
     LightData gpuLight{};
     glm::vec3 p0 = light.p0 + chunkOrigin;
@@ -785,6 +801,8 @@ ChunkBuildScheduler::ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
                                          std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas,
                                          std::recursive_mutex &mutex,
                                          std::vector<ChunkPackedData> &chunkPackedData,
+                                         std::vector<size_t> &chunkPackedDataDirtyBegin,
+                                         std::vector<size_t> &chunkPackedDataDirtyEnd,
                                          uint32_t chunkBuildingBatchSize,
                                          uint32_t chunkBuildingTotalBatches)
     : queuedIndex_(queuedIndex),
@@ -792,6 +810,8 @@ ChunkBuildScheduler::ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
       chunkBuildDatas_(chunkBuildDatas),
       mutex_(mutex),
       chunkPackedData_(chunkPackedData),
+      chunkPackedDataDirtyBegin_(chunkPackedDataDirtyBegin),
+      chunkPackedDataDirtyEnd_(chunkPackedDataDirtyEnd),
       chunkBuildingBatchSize_(chunkBuildingBatchSize),
       chunkBuildingTotalBatches_(chunkBuildingTotalBatches) {
     auto framework = Renderer::instance().framework();
@@ -835,6 +855,7 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
                     chunkPackedData_, chunkBuildData->id, chunkBuildData->x, chunkBuildData->y, chunkBuildData->z,
                     chunkBuildData->geometryCount, chunkBuildData->lightCount,
                     chunkBuildData->lightBuffer != nullptr ? chunkBuildData->lightBuffer->bufferAddress() : 0);
+                markChunkPackedDataDirty(chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_, chunkBuildData->id);
             }
 
             iterFence = buildingFences_.erase(iterFence);
@@ -875,6 +896,7 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
                     chunkPackedData_, chunkBuildData->id, chunkBuildData->x, chunkBuildData->y, chunkBuildData->z,
                     chunkBuildData->geometryCount, chunkBuildData->lightCount,
                     chunkBuildData->lightBuffer != nullptr ? chunkBuildData->lightBuffer->bufferAddress() : 0);
+                markChunkPackedDataDirty(chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_, chunkBuildData->id);
             }
 
             iterFence = buildingFences_.erase(iterFence);
@@ -963,6 +985,7 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                     chunkPackedData_, chunkBuildData->id, chunkBuildData->x, chunkBuildData->y, chunkBuildData->z,
                     chunkBuildData->geometryCount, chunkBuildData->lightCount,
                     chunkBuildData->lightBuffer != nullptr ? chunkBuildData->lightBuffer->bufferAddress() : 0);
+                markChunkPackedDataDirty(chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_, chunkBuildData->id);
             }
             continue;
         }
@@ -1253,6 +1276,8 @@ void Chunks::allocateChunkPackedDataBuffers() {
 
     chunkPackedDataBuffers_.clear();
     chunkPackedDataBuffers_.resize(framework->swapchain()->imageCount());
+    chunkPackedDataDirtyBegin_.assign(chunkPackedDataBuffers_.size(), std::numeric_limits<size_t>::max());
+    chunkPackedDataDirtyEnd_.assign(chunkPackedDataBuffers_.size(), 0);
     if (chunkPackedData_.empty()) {
         return;
     }
@@ -1262,6 +1287,15 @@ void Chunks::allocateChunkPackedDataBuffers() {
         chunkPackedDataBuffer = vk::DeviceLocalBuffer::create(vma, device, false, chunkPackedDataBytes,
                                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
+    markAllChunkPackedDataDirty();
+}
+
+void Chunks::markChunkPackedDataDirty(size_t id) {
+    ::markChunkPackedDataDirty(chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_, id);
+}
+
+void Chunks::markAllChunkPackedDataDirty() {
+    ::markAllChunkPackedDataDirty(chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_, chunkPackedData_.size());
 }
 
 void Chunks::releaseEmissionResources() {
@@ -1290,6 +1324,8 @@ void Chunks::releaseEmissionResources() {
         chunkPackedDataBuffer = nullptr;
     }
     chunkPackedDataBuffers_.clear();
+    chunkPackedDataDirtyBegin_.clear();
+    chunkPackedDataDirtyEnd_.clear();
 }
 
 void Chunks::reset(uint32_t numChunks,
@@ -1316,6 +1352,8 @@ void Chunks::reset(uint32_t numChunks,
     chunks_.resize(numChunks);
     chunkPackedData_.assign(numChunks, ChunkPackedData{});
     chunkPackedDataBuffers_.clear();
+    chunkPackedDataDirtyBegin_.clear();
+    chunkPackedDataDirtyEnd_.clear();
     if (Renderer::options.collectChunkEmission) {
         allocateChunkPackedDataBuffers();
     }
@@ -1332,6 +1370,7 @@ void Chunks::reset(uint32_t numChunks,
     uint32_t chunkBuildingTotalBatches = Renderer::instance().options.chunkBuildingTotalBatches;
     chunkBuildScheduler_ =
         ChunkBuildScheduler::create(queuedIndex_, chunks_, chunkBuildDatas_, mutex_, chunkPackedData_,
+                                    chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_,
                                     chunkBuildingBatchSize, chunkBuildingTotalBatches);
 }
 
@@ -1346,6 +1385,7 @@ void Chunks::resetScheduler() {
     uint32_t chunkBuildingTotalBatches = Renderer::instance().options.chunkBuildingTotalBatches;
     chunkBuildScheduler_ =
         ChunkBuildScheduler::create(queuedIndex_, chunks_, chunkBuildDatas_, mutex_, chunkPackedData_,
+                                    chunkPackedDataDirtyBegin_, chunkPackedDataDirtyEnd_,
                                     chunkBuildingBatchSize, chunkBuildingTotalBatches);
 }
 
@@ -1376,6 +1416,8 @@ void Chunks::setCollectChunkEmission(bool collect) {
     if (collect) {
         if (chunkPackedDataBuffers_.empty()) {
             allocateChunkPackedDataBuffers();
+        } else {
+            markAllChunkPackedDataDirty();
         }
         return;
     }
@@ -1396,11 +1438,20 @@ void Chunks::resetFrame() {
     if (Renderer::options.collectChunkEmission && !chunkPackedData_.empty() &&
         context->frameIndex < chunkPackedDataBuffers_.size()) {
         auto &chunkPackedDataBuffer = chunkPackedDataBuffers_[context->frameIndex];
-        if (chunkPackedDataBuffer != nullptr) {
+        auto dirtyBegin = context->frameIndex < chunkPackedDataDirtyBegin_.size() ?
+                              chunkPackedDataDirtyBegin_[context->frameIndex] :
+                              std::numeric_limits<size_t>::max();
+        auto dirtyEnd = context->frameIndex < chunkPackedDataDirtyEnd_.size() ? chunkPackedDataDirtyEnd_[context->frameIndex] : 0;
+        if (chunkPackedDataBuffer != nullptr && dirtyBegin < dirtyEnd && dirtyEnd <= chunkPackedData_.size()) {
             RAD_PROFILE_SCOPE("chunks.upload_packed_data");
-            const size_t chunkPackedDataBytes = chunkPackedData_.size() * sizeof(ChunkPackedData);
-            chunkPackedDataBuffer->uploadToStagingBuffer(chunkPackedData_.data(), chunkPackedDataBytes, 0);
-            Renderer::instance().buffers()->queueImportantWorldUpload(chunkPackedDataBuffer);
+            const size_t offsetBytes = dirtyBegin * sizeof(ChunkPackedData);
+            const size_t chunkPackedDataBytes = (dirtyEnd - dirtyBegin) * sizeof(ChunkPackedData);
+            chunkPackedDataBuffer->uploadToStagingBuffer(chunkPackedData_.data() + dirtyBegin, chunkPackedDataBytes,
+                                                         offsetBytes);
+            Renderer::instance().buffers()->queueImportantWorldUpload(chunkPackedDataBuffer, chunkPackedDataBytes,
+                                                                      offsetBytes, offsetBytes);
+            chunkPackedDataDirtyBegin_[context->frameIndex] = std::numeric_limits<size_t>::max();
+            chunkPackedDataDirtyEnd_[context->frameIndex] = 0;
         }
     }
 }
@@ -1418,6 +1469,7 @@ void Chunks::invalidateChunk(int id) {
     chunks_[id]->invalidate();
 
     storeChunkPackedData(chunkPackedData_, id, chunks_[id]->x, chunks_[id]->y, chunks_[id]->z, 0, 0, 0);
+    markChunkPackedDataDirty(id);
 }
 
 void Chunks::relocateChunk(int id, int x, int y, int z) {
@@ -1436,6 +1488,7 @@ void Chunks::relocateChunk(int id, int x, int y, int z) {
     chunks_[id]->invalidate();
 
     storeChunkPackedData(chunkPackedData_, id, x, y, z, 0, 0, 0);
+    markChunkPackedDataDirty(id);
 }
 
 void Chunks::queueChunkBuild(ChunkBuildTask task) {
@@ -1533,6 +1586,7 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
             chunkPackedData_, chunkBuildData->id, chunkBuildData->x, chunkBuildData->y, chunkBuildData->z,
             chunkBuildData->geometryCount, chunkBuildData->lightCount,
             chunkBuildData->lightBuffer != nullptr ? chunkBuildData->lightBuffer->bufferAddress() : 0);
+        markChunkPackedDataDirty(chunkBuildData->id);
     } else {
         queuedIndex_.insert(task.id);
         chunkBuildDatas_[task.id] = chunkBuildData;

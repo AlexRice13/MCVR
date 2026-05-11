@@ -116,10 +116,12 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
                         std::vector<std::shared_ptr<Chunk1>> &chunks,
                         std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas,
-                        std::recursive_mutex &mutex,
-                        std::vector<ChunkPackedData> &chunkPackedData,
-                        uint32_t chunkBuildingBatchSize,
-                        uint32_t chunkBuildingTotalBatches);
+                         std::recursive_mutex &mutex,
+                         std::vector<ChunkPackedData> &chunkPackedData,
+                         std::vector<size_t> &chunkPackedDataDirtyBegin,
+                         std::vector<size_t> &chunkPackedDataDirtyEnd,
+                         uint32_t chunkBuildingBatchSize,
+                         uint32_t chunkBuildingTotalBatches);
 
     void tryCheckBatchesFinish();
     void waitAllBatchesFinish();
@@ -134,6 +136,8 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas_;
     std::recursive_mutex &mutex_;
     std::vector<ChunkPackedData> &chunkPackedData_;
+    std::vector<size_t> &chunkPackedDataDirtyBegin_;
+    std::vector<size_t> &chunkPackedDataDirtyEnd_;
 
     std::queue<std::shared_ptr<vk::Fence>> freeFences_;
     std::queue<std::shared_ptr<vk::CommandBuffer>> freeCommandBuffers_;
@@ -233,11 +237,15 @@ class Chunks : public SharedObject<Chunks> {
   private:
     void allocateChunkPackedDataBuffers();
     void releaseEmissionResources();
+    void markChunkPackedDataDirty(size_t id);
+    void markAllChunkPackedDataDirty();
 
     std::recursive_mutex mutex_;
     std::vector<std::shared_ptr<Chunk1>> chunks_;
     std::vector<ChunkPackedData> chunkPackedData_;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> chunkPackedDataBuffers_;
+    std::vector<size_t> chunkPackedDataDirtyBegin_;
+    std::vector<size_t> chunkPackedDataDirtyEnd_;
     std::vector<std::shared_ptr<ChunkBuildData>> chunkBuildDatas_;
     std::set<int64_t> queuedIndex_;
     std::shared_ptr<ChunkBuildScheduler> chunkBuildScheduler_;
