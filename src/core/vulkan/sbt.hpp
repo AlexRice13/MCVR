@@ -49,5 +49,6 @@ class SBT : public SharedObject<SBT> {
     std::shared_ptr<DeviceLocalBuffer> rgenSBT_;
     std::shared_ptr<DeviceLocalBuffer> rmissSBT_;
     std::shared_ptr<DeviceLocalBuffer> rhitSBT_;
+    std::vector<uint32_t> cachedHitGroupIndices_;
 };
 }; // namespace vk

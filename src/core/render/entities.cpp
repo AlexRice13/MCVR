@@ -1,5 +1,6 @@
 #include "core/render/entities.hpp"
 
+#include "common/hit_group_registry.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/vulkan/vertex.hpp"
@@ -87,6 +88,7 @@ EntityBuildData::EntityBuildData(int hashCode,
                                  uint32_t geometryCount,
                                  std::vector<World::GeometryTypes> &&geometryTypes,
                                  std::vector<std::string> &&geometryGroupNames,
+                                 std::vector<uint32_t> &&geometryGroupIds,
                                  std::vector<std::string> &&geometryContentNames,
                                  std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                                  std::vector<std::vector<uint32_t>> &&indices)
@@ -101,6 +103,7 @@ EntityBuildData::EntityBuildData(int hashCode,
       geometryCount(geometryCount),
       geometryTypes(std::move(geometryTypes)),
       geometryGroupNames(std::move(geometryGroupNames)),
+      geometryGroupIds(std::move(geometryGroupIds)),
       geometryContentNames(std::move(geometryContentNames)),
       vertices(std::move(vertices)),
       indices(std::move(indices)),
@@ -238,6 +241,7 @@ Entity::Entity(std::shared_ptr<EntityBuildData> chunkBuildData) {
 
     geometryCount = chunkBuildData->geometryCount;
     geometryGroupNames = std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryGroupNames));
+    geometryGroupIds = std::make_shared<std::vector<uint32_t>>(std::move(chunkBuildData->geometryGroupIds));
     geometryContentNames =
         std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryContentNames));
     vertexCounts = std::make_shared<std::vector<uint32_t>>();
@@ -340,6 +344,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
         uint32_t allVertexCount = 0, allIndexCount = 0;
         std::vector<World::GeometryTypes> geometryTypes;
         std::vector<std::string> geometryGroupNames;
+        std::vector<uint32_t> geometryGroupIds;
         std::vector<std::string> geometryContentNames;
         std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
         std::vector<std::vector<uint32_t>> indices;
@@ -364,6 +369,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
             } else {
                 geometryGroupNames.emplace_back("Entity");
             }
+            geometryGroupIds.push_back(mcvr::HitGroupRegistry::registerName(geometryGroupNames.back()));
             if (task.geometryContentNames != nullptr && task.geometryContentNames[geometryIndex + i] != nullptr) {
                 geometryContentNames.emplace_back(task.geometryContentNames[geometryIndex + i]);
             } else {
@@ -929,6 +935,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                 indices.pop_back();
                 geometryTypes.pop_back();
                 geometryGroupNames.pop_back();
+                geometryGroupIds.pop_back();
                 geometryContentNames.pop_back();
             } else {
                 allVertexCount += geometryVertices.size();
@@ -941,9 +948,9 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
         std::shared_ptr<EntityBuildData> chunkBuildData =
             EntityBuildData::create(hashCode, x, y, z, rayTracingFlag, postRenderFlag, prebuiltBLAS, coordinate,
-                                    geometryCountWithoutGlint,
-                                    std::move(geometryTypes), std::move(geometryGroupNames),
-                                    std::move(geometryContentNames), std::move(vertices), std::move(indices));
+                                     geometryCountWithoutGlint,
+                                     std::move(geometryTypes), std::move(geometryGroupNames), std::move(geometryGroupIds),
+                                     std::move(geometryContentNames), std::move(vertices), std::move(indices));
 
         if (post) {
             entityPostBuildDataBatch_->addData(chunkBuildData);

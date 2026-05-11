@@ -56,6 +56,7 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     uint32_t geometryCount;
     std::vector<World::GeometryTypes> geometryTypes;
     std::vector<std::string> geometryGroupNames;
+    std::vector<uint32_t> geometryGroupIds;
     std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
     std::vector<VkDeviceAddress> indexBufferAddresses;
@@ -81,6 +82,7 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
                    uint32_t geometryCount,
                    std::vector<World::GeometryTypes> &&geometryTypes,
                    std::vector<std::string> &&geometryGroupNames,
+                   std::vector<uint32_t> &&geometryGroupIds,
                    std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                    std::vector<std::vector<uint32_t>> &&indices);
 
@@ -161,6 +163,7 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     uint32_t lightCount = 0;
     uint32_t geometryCount;
     std::shared_ptr<std::vector<std::string>> geometryGroupNames;
+    std::shared_ptr<std::vector<uint32_t>> geometryGroupIds;
 };
 
 struct Chunk1 : public SharedObject<Chunk1> {
@@ -189,6 +192,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint32_t lightCount = 0;
     uint32_t geometryCount;
     std::shared_ptr<std::vector<std::string>> geometryGroupNames;
+    std::shared_ptr<std::vector<uint32_t>> geometryGroupIds;
 
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos, glm::vec3 chunkPos);
 

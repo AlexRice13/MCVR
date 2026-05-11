@@ -1,5 +1,7 @@
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 
+#include "common/hit_group_registry.hpp"
+#include "common/profiler.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
@@ -31,8 +33,36 @@ void WorldPrepare::build() {
 }
 
 WorldPrepareContext::WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext,
-                                         std::shared_ptr<WorldPrepare> worldPrepare)
+                                          std::shared_ptr<WorldPrepare> worldPrepare)
     : frameworkContext(frameworkContext), worldPrepare(worldPrepare) {}
+
+WorldPrepareContext::CachedChunkRow &
+WorldPrepareContext::refreshCachedChunkRow(size_t index, const std::shared_ptr<Chunk1> &chunk) {
+    if (cachedChunkRows.size() <= index) { cachedChunkRows.resize(index + 1); }
+
+    auto &row = cachedChunkRows[index];
+    if (row.chunk == chunk && row.latestVersion == chunk->latestVersion && row.blasVersion == chunk->blasVersion &&
+        row.geometryCount == chunk->geometryCount) {
+        return row;
+    }
+
+    row.chunk = chunk;
+    row.latestVersion = chunk->latestVersion;
+    row.blasVersion = chunk->blasVersion;
+    row.geometryCount = chunk->geometryCount;
+    row.indexBufferAddresses = chunk->indexBufferAddresses;
+    row.positionBufferAddresses = chunk->positionBufferAddresses;
+    row.materialBufferAddresses = chunk->materialBufferAddresses;
+    row.geometryGroupIds = chunk->geometryGroupIds;
+    row.blas = chunk->blas;
+    row.indexBuffer = chunk->indexBuffer;
+    row.positionBuffer = chunk->positionBuffer;
+    row.materialBuffer = chunk->materialBuffer;
+    row.lightInfos = chunk->lightInfos;
+    row.lightBuffer = chunk->lightBuffer;
+    row.lightCount = chunk->lightCount;
+    return row;
+}
 
 void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
                                        std::vector<uint64_t> &indexBufferAddrs,
@@ -141,6 +171,7 @@ void WorldPrepareContext::render() {
     auto worldPrepare1 = worldPrepare.lock();
     if (rayTracingModule == nullptr) { return; }
     if (worldPrepare1 == nullptr) { return; }
+    RAD_PROFILE_SCOPE("world_prepare.render");
 
     std::shared_ptr<Framework> framework = Renderer::instance().framework();
     std::shared_ptr<FrameworkContext> context = frameworkContext.lock();
@@ -155,8 +186,15 @@ void WorldPrepareContext::render() {
 
     auto chunkBuildScheduler = chunks->chunkBuildScheduler();
     if (chunkBuildScheduler != nullptr) {
-        chunkBuildScheduler->tryCheckBatchesFinish();
-        chunkBuildScheduler->tryScheduleBatches(chunkBuildScheduler->chunkBuildingBatchSize());
+        RAD_PROFILE_SCOPE("world_prepare.chunk_scheduler");
+        {
+            RAD_PROFILE_SCOPE("world_prepare.try_check_batches_finish");
+            chunkBuildScheduler->tryCheckBatchesFinish();
+        }
+        {
+            RAD_PROFILE_SCOPE("world_prepare.try_schedule_batches");
+            chunkBuildScheduler->tryScheduleBatches(chunkBuildScheduler->chunkBuildingBatchSize());
+        }
     }
 
     std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
@@ -177,7 +215,7 @@ void WorldPrepareContext::render() {
 
     uint32_t blasAccu = 0, blasGroupAccu = 0;
     std::vector<uint32_t> blasOffset;
-    hitGroupNames.clear();
+    hitGroupNameIds.clear();
     std::vector<uint64_t> indexBufferAddrs;
     std::vector<uint64_t> positionBufferAddrs, materialBufferAddrs;
     std::vector<uint64_t> lastIndexBufferAddrs;
@@ -187,9 +225,13 @@ void WorldPrepareContext::render() {
     tlasBuilder = vk::TLASBuilder::create();
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
     int blasIndex = 0;
+    uint32_t entityInstanceCount = 0;
+    uint32_t chunkInstanceCount = 0;
+    uint32_t activeChunkSlots = 0;
 
     // Entity
     {
+        RAD_PROFILE_SCOPE("world_prepare.entity_instance_loop");
         auto entityBatch = entities->entityBatch();
 
         if (entityBatch != nullptr) {
@@ -250,14 +292,14 @@ void WorldPrepareContext::render() {
                     throw std::runtime_error("prebuilt blas not implemented yet!");
                 }
 
-                hitGroupNames.push_back("shadow");
+                hitGroupNameIds.push_back(mcvr::HitGroupRegistry::shadowId());
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
-                    const std::string &groupName =
-                        entities1[i]->geometryGroupNames != nullptr &&
-                                j < static_cast<int>(entities1[i]->geometryGroupNames->size()) ?
-                            (*entities1[i]->geometryGroupNames)[j] :
-                            "default";
-                    hitGroupNames.push_back(groupName);
+                    if (entities1[i]->geometryGroupIds != nullptr &&
+                        j < static_cast<int>(entities1[i]->geometryGroupIds->size())) {
+                        hitGroupNameIds.push_back((*entities1[i]->geometryGroupIds)[j]);
+                    } else {
+                        hitGroupNameIds.push_back(mcvr::HitGroupRegistry::defaultId());
+                    }
                 }
 
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
@@ -317,80 +359,105 @@ void WorldPrepareContext::render() {
                 blasGroupAccu += entities1[i]->geometryCount + 1;
 
                 blasIndex++;
+                entityInstanceCount++;
             }
         }
     }
 
     // Chunk
     {
+        RAD_PROFILE_SCOPE("world_prepare.chunk_instance_loop");
         auto &chunk1s = chunks->chunks();
         for (int i = 0; i < chunk1s.size(); i++) {
             auto &chunk1 = chunk1s[i];
-            if (chunk1->blas == nullptr) continue;
-            chunk1->retainResources(framework->frameResourceRetainer());
+            if (chunk1->blas == nullptr) {
+                if (cachedChunkRows.size() > static_cast<size_t>(i)) { cachedChunkRows[i] = CachedChunkRow{}; }
+                continue;
+            }
+            activeChunkSlots++;
+            auto &chunkRow = refreshCachedChunkRow(i, chunk1);
 
             VkTransformMatrixKHR transform = {
-                1, 0, 0, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x), //
-                0, 1, 0, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y), //
-                0, 0, 1, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z), //
+                1, 0, 0, static_cast<float>(static_cast<double>(chunkRow.chunk->x) - cameraPos.x), //
+                0, 1, 0, static_cast<float>(static_cast<double>(chunkRow.chunk->y) - cameraPos.y), //
+                0, 0, 1, static_cast<float>(static_cast<double>(chunkRow.chunk->z) - cameraPos.z), //
             };
 
-            instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunk1->blas);
+            instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunkRow.blas);
 
-            hitGroupNames.push_back("shadow");
-            for (int j = 0; j < chunk1->geometryCount; j++) {
-                const std::string &groupName =
-                    chunk1->geometryGroupNames != nullptr && j < static_cast<int>(chunk1->geometryGroupNames->size()) ?
-                        (*chunk1->geometryGroupNames)[j] :
-                        "default";
-                hitGroupNames.push_back(groupName);
+            hitGroupNameIds.push_back(mcvr::HitGroupRegistry::shadowId());
+            for (int j = 0; j < chunkRow.geometryCount; j++) {
+                if (chunkRow.geometryGroupIds != nullptr && j < static_cast<int>(chunkRow.geometryGroupIds->size())) {
+                    hitGroupNameIds.push_back((*chunkRow.geometryGroupIds)[j]);
+                } else {
+                    hitGroupNameIds.push_back(mcvr::HitGroupRegistry::defaultId());
+                }
             }
 
-            for (int j = 0; j < chunk1->geometryCount; j++) {
-                indexBufferAddrs.push_back((*chunk1->indexBufferAddresses)[j]);
-                positionBufferAddrs.push_back((*chunk1->positionBufferAddresses)[j]);
-                materialBufferAddrs.push_back((*chunk1->materialBufferAddresses)[j]);
+            for (int j = 0; j < chunkRow.geometryCount; j++) {
+                indexBufferAddrs.push_back((*chunkRow.indexBufferAddresses)[j]);
+                positionBufferAddrs.push_back((*chunkRow.positionBufferAddresses)[j]);
+                materialBufferAddrs.push_back((*chunkRow.materialBufferAddresses)[j]);
                 lastIndexBufferAddrs.push_back(0);
                 lastPositionBufferAddrs.push_back(0);
             }
 
             {
                 glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
-                    glm::vec4(1.0f, 0.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x)), //
-                    glm::vec4(0.0f, 1.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y)), //
-                    glm::vec4(0.0f, 0.0f, 1.0f, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z)), //
+                    glm::vec4(1.0f, 0.0f, 0.0f,
+                              static_cast<float>(static_cast<double>(chunkRow.chunk->x) - cameraPos.x)), //
+                    glm::vec4(0.0f, 1.0f, 0.0f,
+                              static_cast<float>(static_cast<double>(chunkRow.chunk->y) - cameraPos.y)), //
+                    glm::vec4(0.0f, 0.0f, 1.0f,
+                              static_cast<float>(static_cast<double>(chunkRow.chunk->z) - cameraPos.z)), //
                     glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)));
                 lastObjToWorldMats.push_back(lastObjToWorldMat);
             }
 
             blasOffset.push_back(blasAccu);
-            blasAccu += chunk1->geometryCount;
-            blasGroupAccu += chunk1->geometryCount + 1;
+            blasAccu += chunkRow.geometryCount;
+            blasGroupAccu += chunkRow.geometryCount + 1;
 
             blasIndex++;
+            chunkInstanceCount++;
         }
+        RAD_PROFILE_COUNTER("world_prepare.chunk_slots", chunk1s.size());
+        RAD_PROFILE_COUNTER("world_prepare.active_chunks", activeChunkSlots);
+        RAD_PROFILE_COUNTER("world_prepare.chunk_instances", chunkInstanceCount);
     }
+    RAD_PROFILE_COUNTER("world_prepare.entity_instances", entityInstanceCount);
+    RAD_PROFILE_COUNTER("world_prepare.hit_group_names", hitGroupNameIds.size());
+    RAD_PROFILE_COUNTER("world_prepare.tlas_instances", instanceBuilder.instances.size());
 
     if (instanceBuilder.instances.empty()) {
         tlas = nullptr;
         return;
     }
 
-    tlas = instanceBuilder.endInstanceBuilder(device, vma)
-               ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
-               ->querySizeInfo(device)
-               ->allocateBuffers(physicalDevice, device, vma)
-               ->buildAndSubmit(device, worldCommandBuffer);
+    {
+        RAD_PROFILE_SCOPE("world_prepare.tlas_build");
+        tlas = instanceBuilder.endInstanceBuilder(device, vma)
+                   ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+                   ->querySizeInfo(device)
+                   ->allocateBuffers(physicalDevice, device, vma)
+                   ->buildAndSubmit(device, worldCommandBuffer);
+    }
 
-    worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
-        .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        .srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-        .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-        .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-    }});
+    {
+        RAD_PROFILE_SCOPE("world_prepare.tlas_barrier");
+        worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
+            .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            .srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+        }});
+    }
 
-    uploadBuffer(blasOffset, indexBufferAddrs, positionBufferAddrs, materialBufferAddrs, lastIndexBufferAddrs,
-                 lastPositionBufferAddrs, lastObjToWorldMats);
+    {
+        RAD_PROFILE_SCOPE("world_prepare.upload_buffers");
+        uploadBuffer(blasOffset, indexBufferAddrs, positionBufferAddrs, materialBufferAddrs, lastIndexBufferAddrs,
+                     lastPositionBufferAddrs, lastObjToWorldMats);
+    }
 }
 
 void WorldPrepareContext::setupHitGroupSbt(const std::unordered_map<std::string, uint32_t> &hitGroupNameToIndex,
@@ -399,17 +466,28 @@ void WorldPrepareContext::setupHitGroupSbt(const std::unordered_map<std::string,
                                            std::shared_ptr<vk::CommandBuffer> commandBuffer,
                                            std::shared_ptr<vk::SBT> updateSbt,
                                            std::shared_ptr<vk::SBT> querySbt) {
+    RAD_PROFILE_SCOPE("world_prepare.setup_hit_group_sbt");
     std::vector<uint32_t> hitGroupIndices;
-    hitGroupIndices.reserve(hitGroupNames.size());
+    hitGroupIndices.reserve(hitGroupNameIds.size());
 
-    for (const std::string &groupName : hitGroupNames) {
-        if (groupName == "shadow") {
-            hitGroupIndices.push_back(shadowHitGroupIndex);
-            continue;
+    {
+        RAD_PROFILE_SCOPE("world_prepare.resolve_hit_group_names");
+        const auto registeredNames = mcvr::HitGroupRegistry::namesSnapshot();
+        for (const uint32_t groupId : hitGroupNameIds) {
+            if (groupId == mcvr::HitGroupRegistry::shadowId()) {
+                hitGroupIndices.push_back(shadowHitGroupIndex);
+                continue;
+            }
+
+            if (groupId >= registeredNames.size()) {
+                hitGroupIndices.push_back(fallbackHitGroupIndex);
+                continue;
+            }
+
+            const std::string &groupName = registeredNames[groupId];
+            auto iter = hitGroupNameToIndex.find(groupName);
+            hitGroupIndices.push_back(iter == hitGroupNameToIndex.end() ? fallbackHitGroupIndex : iter->second);
         }
-
-        auto iter = hitGroupNameToIndex.find(groupName);
-        hitGroupIndices.push_back(iter == hitGroupNameToIndex.end() ? fallbackHitGroupIndex : iter->second);
     }
 
     if (updateSbt != nullptr) { updateSbt->setupHitSBT(hitGroupIndices, commandBuffer); }

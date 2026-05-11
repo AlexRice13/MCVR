@@ -1,5 +1,6 @@
 #include "core/render/render_framework.hpp"
 
+#include "common/profiler.hpp"
 #include "common/shared.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
@@ -186,6 +187,8 @@ Framework::~Framework() {
 
 void Framework::acquireContext() {
     if (!running_) return;
+    RAD_PROFILE_FRAME();
+    RAD_PROFILE_SCOPE("framework.acquire_context");
 
     std::shared_ptr<FrameworkContext> lastContext;
     if (currentContext_) lastContext = currentContext_;
@@ -193,8 +196,11 @@ void Framework::acquireContext() {
 
     std::shared_ptr<vk::Semaphore> imageAcquiredSemaphore = acquireSemaphore();
     uint32_t imageIndex;
-    result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
-                                   imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
+    {
+        RAD_PROFILE_SCOPE("framework.acquire_next_image");
+        result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
+                                       imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
+    }
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         recycleSemaphore(imageAcquiredSemaphore);
         recreate();
@@ -207,7 +213,10 @@ void Framework::acquireContext() {
     }
 
     std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
-    result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    {
+        RAD_PROFILE_SCOPE("framework.fence_wait");
+        result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    }
     if (result != VK_SUCCESS) {
         std::cout << "vkWaitForFences failed with error: " << std::dec << result << std::endl;
         waitDeviceIdle();
@@ -225,21 +234,27 @@ void Framework::acquireContext() {
     }
     currentContext_->imageAcquiredSemaphore = imageAcquiredSemaphore;
 
-    currentContext_->uploadCommandBuffer->begin();
-    currentContext_->worldCommandBuffer->begin();
-    currentContext_->overlayCommandBuffer->begin();
-    currentContext_->fuseCommandBuffer->begin();
+    {
+        RAD_PROFILE_SCOPE("framework.command_buffers_begin");
+        currentContext_->uploadCommandBuffer->begin();
+        currentContext_->worldCommandBuffer->begin();
+        currentContext_->overlayCommandBuffer->begin();
+        currentContext_->fuseCommandBuffer->begin();
+    }
 
-    auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
-    std::shared_ptr<UIModuleContext> lastUIContext =
-        lastContext == nullptr ? nullptr : pipeline_->acquirePipelineContext(lastContext)->uiModuleContext;
+    {
+        RAD_PROFILE_SCOPE("framework.pipeline_begin_reset");
+        auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
+        std::shared_ptr<UIModuleContext> lastUIContext =
+            lastContext == nullptr ? nullptr : pipeline_->acquirePipelineContext(lastContext)->uiModuleContext;
 
-    pipelineContext->uiModuleContext->begin(lastUIContext);
-    Renderer::instance().buffers()->resetFrame();
-    Renderer::instance().textures()->resetFrame();
-    Renderer::instance().world()->resetFrame();
-    Renderer::instance().world()->chunks()->resetFrame();
-    Renderer::instance().world()->entities()->resetFrame();
+        pipelineContext->uiModuleContext->begin(lastUIContext);
+        Renderer::instance().buffers()->resetFrame();
+        Renderer::instance().textures()->resetFrame();
+        Renderer::instance().world()->resetFrame();
+        Renderer::instance().world()->chunks()->resetFrame();
+        Renderer::instance().world()->entities()->resetFrame();
+    }
 
     static int frames = 0;
     static auto lastTime = std::chrono::high_resolution_clock::now();
@@ -261,23 +276,42 @@ void Framework::acquireContext() {
 
 void Framework::submitCommand() {
     if (!running_) return;
+    RAD_PROFILE_SCOPE("framework.submit_command");
 
     Renderer::instance().framework()->safeAcquireCurrentContext(); // ensure context is non nullptr
 
-    Renderer::instance().textures()->performQueuedUpload();
-    Renderer::instance().buffers()->performQueuedUpload();
-    Renderer::instance().buffers()->buildAndUploadOverlayUniformBuffer();
+    {
+        RAD_PROFILE_SCOPE("framework.texture_upload");
+        Renderer::instance().textures()->performQueuedUpload();
+    }
+    {
+        RAD_PROFILE_SCOPE("framework.buffer_upload");
+        Renderer::instance().buffers()->performQueuedUpload();
+        Renderer::instance().buffers()->buildAndUploadOverlayUniformBuffer();
+    }
 
     auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
-    if (Renderer::instance().world()->shouldRender()) pipelineContext->worldPipelineContext->render();
-    pipelineContext->uiModuleContext->end();
+    if (Renderer::instance().world()->shouldRender()) {
+        RAD_PROFILE_SCOPE("framework.world_render");
+        pipelineContext->worldPipelineContext->render();
+    }
+    {
+        RAD_PROFILE_SCOPE("framework.ui_end");
+        pipelineContext->uiModuleContext->end();
+    }
 
-    currentContext_->fuseFinal();
+    {
+        RAD_PROFILE_SCOPE("framework.fuse_final");
+        currentContext_->fuseFinal();
+    }
 
-    currentContext_->uploadCommandBuffer->end();
-    currentContext_->worldCommandBuffer->end();
-    currentContext_->overlayCommandBuffer->end();
-    currentContext_->fuseCommandBuffer->end();
+    {
+        RAD_PROFILE_SCOPE("framework.command_buffers_end");
+        currentContext_->uploadCommandBuffer->end();
+        currentContext_->worldCommandBuffer->end();
+        currentContext_->overlayCommandBuffer->end();
+        currentContext_->fuseCommandBuffer->end();
+    }
 
     std::vector<VkSemaphore> waitSemaphores = {currentContext_->imageAcquiredSemaphore->vkSemaphore()};
     std::vector<VkPipelineStageFlags> waitStageMasks = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
@@ -300,8 +334,11 @@ void Framework::submitCommand() {
     vkSubmitInfo.pSignalSemaphores = signalSemaphores.data();
 
     std::shared_ptr<vk::Fence> fence = currentContext_->commandFinishedFence;
-    vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
-    vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+    {
+        RAD_PROFILE_SCOPE("framework.queue_submit");
+        vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
+        vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+    }
 }
 
 void Framework::present() {
@@ -653,6 +690,7 @@ FrameResourceRetainer::FrameResourceRetainer(std::shared_ptr<Framework> framewor
 }
 
 void FrameResourceRetainer::beginFrame(uint32_t frameIndex) {
+    RAD_PROFILE_SCOPE("frr.begin_frame");
     std::unique_lock<std::recursive_mutex> lck(mtx_);
 
     currentFrameIndex_ = frameIndex;

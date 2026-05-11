@@ -1,5 +1,6 @@
 #include "core/vulkan/sbt.hpp"
 
+#include "common/profiler.hpp"
 #include "core/vulkan/buffer.hpp"
 #include "core/vulkan/command.hpp"
 #include "core/vulkan/device.hpp"
@@ -85,45 +86,60 @@ void vk::SBT::uploadStaticSBT(std::shared_ptr<CommandBuffer> commandBuffer) {
 }
 
 void vk::SBT::setupHitSBT(std::vector<uint32_t> &hitGroupIndices, std::shared_ptr<CommandBuffer> commandBuffer) {
+    RAD_PROFILE_SCOPE("sbt.setup_hit_sbt");
     VkDeviceSize rhitSBTSize = hitGroupIndices.size() * alignedHandleSize_;
     if (rhitSBTSize == 0) {
         std::cerr << "Hit group should contains something!" << std::endl;
         exit(1);
     }
 
+    if (rhitSBT_ != nullptr && cachedHitGroupIndices_ == hitGroupIndices && rhitSBT_->size() == rhitSBTSize) {
+        hitRegion_.deviceAddress = rhitSBT_->bufferAddress();
+        hitRegion_.stride = alignedHandleSize_;
+        hitRegion_.size = rhitSBTSize;
+        return;
+    }
+
     std::vector<uint8_t> cachedRhitSBT(rhitSBTSize, 0);
-    for (uint32_t i = 0; i < hitGroupIndices.size(); ++i) {
-        uint32_t hit_group_id = hitGroupIndices[i];
+    {
+        RAD_PROFILE_SCOPE("sbt.fill_hit_sbt");
+        for (uint32_t i = 0; i < hitGroupIndices.size(); ++i) {
+            uint32_t hit_group_id = hitGroupIndices[i];
 
-        // Access source storage using handleSize_ (tightly packed)
-        uint32_t palette_offset = (1 + missCount_ + hit_group_id) * handleSize_;
-        uint8_t *pSourceHandle = shaderHandleStorage_.data() + palette_offset;
+            // Access source storage using handleSize_ (tightly packed)
+            uint32_t palette_offset = (1 + missCount_ + hit_group_id) * handleSize_;
+            uint8_t *pSourceHandle = shaderHandleStorage_.data() + palette_offset;
 
-        // Write to destination SBT using alignedHandleSize_ (stride requirement)
-        uint8_t *pDest = cachedRhitSBT.data() + i * alignedHandleSize_;
-        memcpy(pDest, pSourceHandle, handleSize_);
+            // Write to destination SBT using alignedHandleSize_ (stride requirement)
+            uint8_t *pDest = cachedRhitSBT.data() + i * alignedHandleSize_;
+            memcpy(pDest, pSourceHandle, handleSize_);
+        }
     }
 
-    if (rhitSBT_ == nullptr || rhitSBT_->size() != rhitSBTSize) {
-        rhitSBT_ = DeviceLocalBuffer::create(
-            vma_, device_, false, rhitSBTSize,
-            VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0,
-            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, baseAlignment_);
-    }
+    {
+        RAD_PROFILE_SCOPE("sbt.upload_hit_sbt");
+        if (rhitSBT_ == nullptr || rhitSBT_->size() != rhitSBTSize) {
+            rhitSBT_ = DeviceLocalBuffer::create(
+                vma_, device_, false, rhitSBTSize,
+                VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0,
+                VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, baseAlignment_);
+        }
 
-    rhitSBT_->uploadToStagingBuffer(cachedRhitSBT.data());
-    rhitSBT_->uploadToBuffer(commandBuffer);
-    commandBuffer->barriersBufferImage(
-        {vk::CommandBuffer::BufferMemoryBarrier{
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .buffer = rhitSBT_,
-        }},
-        {});
+        rhitSBT_->uploadToStagingBuffer(cachedRhitSBT.data());
+        rhitSBT_->uploadToBuffer(commandBuffer);
+        cachedHitGroupIndices_ = hitGroupIndices;
+        commandBuffer->barriersBufferImage(
+            {vk::CommandBuffer::BufferMemoryBarrier{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = rhitSBT_,
+            }},
+            {});
+    }
 
     hitRegion_.deviceAddress = rhitSBT_->bufferAddress();
     hitRegion_.stride = alignedHandleSize_;

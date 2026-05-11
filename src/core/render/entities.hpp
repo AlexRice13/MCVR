@@ -55,6 +55,7 @@ struct EntityBuildData : public SharedObject<EntityBuildData> {
     uint32_t geometryCount;
     std::vector<World::GeometryTypes> geometryTypes;
     std::vector<std::string> geometryGroupNames;
+    std::vector<uint32_t> geometryGroupIds;
     std::vector<std::string> geometryContentNames;
     std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
@@ -74,6 +75,7 @@ struct EntityBuildData : public SharedObject<EntityBuildData> {
                     uint32_t geometryCount,
                     std::vector<World::GeometryTypes> &&geometryTypes,
                     std::vector<std::string> &&geometryGroupNames,
+                    std::vector<uint32_t> &&geometryGroupIds,
                     std::vector<std::string> &&geometryContentNames,
                     std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                     std::vector<std::vector<uint32_t>> &&indices);
@@ -119,6 +121,7 @@ struct Entity : public SharedObject<Entity> {
 
     uint32_t geometryCount;
     std::shared_ptr<std::vector<std::string>> geometryGroupNames;
+    std::shared_ptr<std::vector<uint32_t>> geometryGroupIds;
     std::shared_ptr<std::vector<std::string>> geometryContentNames;
     std::shared_ptr<std::vector<uint32_t>> vertexCounts;
     std::shared_ptr<std::vector<uint32_t>> indexCounts;

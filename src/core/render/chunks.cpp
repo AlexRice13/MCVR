@@ -1,5 +1,7 @@
 #include "core/render/chunks.hpp"
 
+#include "common/hit_group_registry.hpp"
+#include "common/profiler.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -304,6 +306,7 @@ ChunkBuildData::ChunkBuildData(int64_t id,
                                uint32_t geometryCount,
                                std::vector<World::GeometryTypes> &&geometryTypes,
                                std::vector<std::string> &&geometryGroupNames,
+                               std::vector<uint32_t> &&geometryGroupIds,
                                std::vector<std::vector<vk::VertexFormat::PBRVertex>> &&vertices,
                                std::vector<std::vector<uint32_t>> &&indices)
     : id(id),
@@ -317,6 +320,7 @@ ChunkBuildData::ChunkBuildData(int64_t id,
       geometryCount(geometryCount),
       geometryTypes(std::move(geometryTypes)),
       geometryGroupNames(std::move(geometryGroupNames)),
+      geometryGroupIds(std::move(geometryGroupIds)),
       vertices(std::move(vertices)),
       indices(std::move(indices)),
       indexBufferAddresses(),
@@ -804,6 +808,7 @@ ChunkBuildScheduler::ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
 }
 
 void ChunkBuildScheduler::tryCheckBatchesFinish() {
+    RAD_PROFILE_SCOPE("chunk_scheduler.try_check_batches_finish");
     auto framework = Renderer::instance().framework();
     auto device = framework->device();
 
@@ -891,12 +896,14 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
 
 void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
     if (!Renderer::instance().framework()->isRunning()) return;
+    RAD_PROFILE_SCOPE("chunk_scheduler.try_schedule_batches");
     while (true) {
         std::shared_ptr<vk::Fence> fence;
         std::shared_ptr<vk::CommandBuffer> commandBuffer;
         std::shared_ptr<ChunkBuildDataBatch> chunkBuildDataBatch;
 
         {
+            RAD_PROFILE_SCOPE("chunk_scheduler.select_batch");
             std::unique_lock<std::recursive_mutex> lock(mutex_);
             if (freeFences_.empty() || freeCommandBuffers_.empty()) { return; }
 
@@ -929,7 +936,10 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
             pendingBatchFrames_ = 0;
         }
 
-        chunkBuildDataBatch->build();
+        {
+            RAD_PROFILE_SCOPE("chunk_scheduler.batch_build");
+            chunkBuildDataBatch->build();
+        }
 
         bool hasLightUploads = false;
         for (const auto &chunkBuildData : chunkBuildDataBatch->batchData) {
@@ -963,15 +973,18 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
         const auto queueFamilyIndex =
             useSecondaryQueue_ ? physicalDevice->secondaryQueueIndex() : physicalDevice->mainQueueIndex();
 
-        commandBuffer->begin();
-        if (chunkBuildDataBatch->positionBuffer != nullptr) {
-            chunkBuildDataBatch->indexBuffer->uploadToBuffer(commandBuffer);
-            chunkBuildDataBatch->positionBuffer->uploadToBuffer(commandBuffer);
-            chunkBuildDataBatch->materialBuffer->uploadToBuffer(commandBuffer);
-        }
-        for (const auto &chunkBuildData : chunkBuildDataBatch->batchData) {
-            if (chunkBuildData->lightBuffer != nullptr) {
-                chunkBuildData->lightBuffer->uploadToBuffer(commandBuffer);
+        {
+            RAD_PROFILE_SCOPE("chunk_scheduler.record_uploads");
+            commandBuffer->begin();
+            if (chunkBuildDataBatch->positionBuffer != nullptr) {
+                chunkBuildDataBatch->indexBuffer->uploadToBuffer(commandBuffer);
+                chunkBuildDataBatch->positionBuffer->uploadToBuffer(commandBuffer);
+                chunkBuildDataBatch->materialBuffer->uploadToBuffer(commandBuffer);
+            }
+            for (const auto &chunkBuildData : chunkBuildDataBatch->batchData) {
+                if (chunkBuildData->lightBuffer != nullptr) {
+                    chunkBuildData->lightBuffer->uploadToBuffer(commandBuffer);
+                }
             }
         }
 
@@ -1032,6 +1045,7 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
         }
 
         if (chunkBuildDataBatch->blasBatchBuilder != nullptr) {
+            RAD_PROFILE_SCOPE("chunk_scheduler.record_blas_submit");
             chunkBuildDataBatch->blasBatchBuilder->submit(commandBuffer);
         }
         commandBuffer->end();
@@ -1041,10 +1055,13 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
         vkSubmitInfo.commandBufferCount = 1;
         vkSubmitInfo.pCommandBuffers = &commandBuffer->vkCommandBuffer();
 
-        if (useSecondaryQueue_) {
-            vkQueueSubmit(device->secondaryQueue(), 1, &vkSubmitInfo, fence->vkFence());
-        } else {
-            vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+        {
+            RAD_PROFILE_SCOPE("chunk_scheduler.queue_submit");
+            if (useSecondaryQueue_) {
+                vkQueueSubmit(device->secondaryQueue(), 1, &vkSubmitInfo, fence->vkFence());
+            } else {
+                vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+            }
         }
 
         std::unique_lock<std::recursive_mutex> lock(mutex_);
@@ -1121,6 +1138,9 @@ bool Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
         frr.retain(geometryGroupNames);
         geometryGroupNames = std::make_shared<std::vector<std::string>>(std::move(chunkBuildData->geometryGroupNames));
+
+        frr.retain(geometryGroupIds);
+        geometryGroupIds = std::make_shared<std::vector<uint32_t>>(std::move(chunkBuildData->geometryGroupIds));
         return true;
     } else {
         frr.retain(chunkBuildData->blas);
@@ -1172,6 +1192,9 @@ void Chunk1::invalidate() {
 
     frr.retain(geometryGroupNames);
     geometryGroupNames = nullptr;
+
+    frr.retain(geometryGroupIds);
+    geometryGroupIds = nullptr;
 }
 
 void Chunk1::retainResources(FrameResourceRetainer &frr) {
@@ -1184,6 +1207,7 @@ void Chunk1::retainResources(FrameResourceRetainer &frr) {
     frr.retain(materialBuffer);
     frr.retain(lightInfos);
     frr.retain(lightBuffer);
+    frr.retain(geometryGroupIds);
 }
 
 void Chunk1::releaseEmissionResources(FrameResourceRetainer &frr) {
@@ -1213,6 +1237,7 @@ std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
     ret->lightCount = lightCount;
     ret->geometryCount = geometryCount;
     ret->geometryGroupNames = geometryGroupNames;
+    ret->geometryGroupIds = geometryGroupIds;
 
     return ret;
 }
@@ -1359,6 +1384,7 @@ void Chunks::setCollectChunkEmission(bool collect) {
 }
 
 void Chunks::resetFrame() {
+    RAD_PROFILE_SCOPE("chunks.reset_frame");
     auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto framework = Renderer::instance().framework();
@@ -1371,6 +1397,7 @@ void Chunks::resetFrame() {
         context->frameIndex < chunkPackedDataBuffers_.size()) {
         auto &chunkPackedDataBuffer = chunkPackedDataBuffers_[context->frameIndex];
         if (chunkPackedDataBuffer != nullptr) {
+            RAD_PROFILE_SCOPE("chunks.upload_packed_data");
             const size_t chunkPackedDataBytes = chunkPackedData_.size() * sizeof(ChunkPackedData);
             chunkPackedDataBuffer->uploadToStagingBuffer(chunkPackedData_.data(), chunkPackedDataBytes, 0);
             Renderer::instance().buffers()->queueImportantWorldUpload(chunkPackedDataBuffer);
@@ -1412,45 +1439,52 @@ void Chunks::relocateChunk(int id, int x, int y, int z) {
 }
 
 void Chunks::queueChunkBuild(ChunkBuildTask task) {
+    RAD_PROFILE_THREAD();
+    RAD_PROFILE_SCOPE("chunks.queue_chunk_build");
     uint32_t allVertexCount = 0, allIndexCount = 0;
     std::vector<World::GeometryTypes> geometryTypes;
     std::vector<std::string> geometryGroupNames;
+    std::vector<uint32_t> geometryGroupIds;
     std::vector<std::vector<vk::VertexFormat::PBRVertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
 
-    for (int i = 0; i < task.geometryCount; i++) {
-        World::GeometryTypes geometryType = static_cast<World::GeometryTypes>(task.geometryTypes[i]);
-        auto &geometryVertices = vertices.emplace_back();
-        auto &geometryIndices = indices.emplace_back();
+    {
+        RAD_PROFILE_SCOPE("chunks.queue_chunk_build.copy_geometry");
+        for (int i = 0; i < task.geometryCount; i++) {
+            World::GeometryTypes geometryType = static_cast<World::GeometryTypes>(task.geometryTypes[i]);
+            auto &geometryVertices = vertices.emplace_back();
+            auto &geometryIndices = indices.emplace_back();
 
-        geometryVertices.resize(task.vertexCounts[i]);
-        std::memcpy(geometryVertices.data(), task.vertices[i],
-                    task.vertexCounts[i] * sizeof(vk::VertexFormat::PBRVertex));
+            geometryVertices.resize(task.vertexCounts[i]);
+            std::memcpy(geometryVertices.data(), task.vertices[i],
+                        task.vertexCounts[i] * sizeof(vk::VertexFormat::PBRVertex));
 
-        for (int j = 0; j < task.vertexCounts[i]; j += 4) {
-            geometryIndices.push_back(j + 0);
-            geometryIndices.push_back(j + 1);
-            geometryIndices.push_back(j + 2);
-            geometryIndices.push_back(j + 2);
-            geometryIndices.push_back(j + 3);
-            geometryIndices.push_back(j + 0);
+            for (int j = 0; j < task.vertexCounts[i]; j += 4) {
+                geometryIndices.push_back(j + 0);
+                geometryIndices.push_back(j + 1);
+                geometryIndices.push_back(j + 2);
+                geometryIndices.push_back(j + 2);
+                geometryIndices.push_back(j + 3);
+                geometryIndices.push_back(j + 0);
+            }
+
+            if (geometryVertices.empty() || geometryIndices.empty()) {
+                vertices.pop_back();
+                indices.pop_back();
+                continue;
+            }
+
+            geometryTypes.push_back(geometryType);
+            if (task.geometryGroupNames != nullptr && task.geometryGroupNames[i] != nullptr) {
+                geometryGroupNames.emplace_back(task.geometryGroupNames[i]);
+            } else {
+                geometryGroupNames.emplace_back("default");
+            }
+            geometryGroupIds.push_back(mcvr::HitGroupRegistry::registerName(geometryGroupNames.back()));
+
+            allVertexCount += geometryVertices.size();
+            allIndexCount += geometryIndices.size();
         }
-
-        if (geometryVertices.empty() || geometryIndices.empty()) {
-            vertices.pop_back();
-            indices.pop_back();
-            continue;
-        }
-
-        geometryTypes.push_back(geometryType);
-        if (task.geometryGroupNames != nullptr && task.geometryGroupNames[i] != nullptr) {
-            geometryGroupNames.emplace_back(task.geometryGroupNames[i]);
-        } else {
-            geometryGroupNames.emplace_back("default");
-        }
-
-        allVertexCount += geometryVertices.size();
-        allIndexCount += geometryIndices.size();
     }
 
     std::unique_lock<std::recursive_mutex> lock(mutex_);
@@ -1460,11 +1494,13 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
         ChunkBuildData::create(task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++,
                                collectChunkEmission, allVertexCount, allIndexCount,
                                static_cast<uint32_t>(vertices.size()), std::move(geometryTypes),
-                               std::move(geometryGroupNames), std::move(vertices), std::move(indices));
+                               std::move(geometryGroupNames), std::move(geometryGroupIds), std::move(vertices),
+                               std::move(indices));
 
     if (collectChunkEmission && (Renderer::instance().textures() != nullptr)) {
         auto textures = Renderer::instance().textures();
         if (auto emission = textures->emission(); emission != nullptr) {
+            RAD_PROFILE_SCOPE("chunks.queue_chunk_build.build_light_infos");
             chunkBuildData->buildLightInfos(*emission);
         }
     }
@@ -1475,7 +1511,10 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
         frr.retain(chunkBuildDatas_[task.id]);
         chunkBuildDatas_[task.id] = nullptr;
 
-        chunkBuildData->build(false);
+        {
+            RAD_PROFILE_SCOPE("chunks.queue_chunk_build.important_build");
+            chunkBuildData->build(false);
+        }
         if (chunkBuildData->positionBuffer != nullptr) {
             Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->indexBuffer);
             Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->positionBuffer);

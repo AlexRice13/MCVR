@@ -3,6 +3,7 @@
 #include "common/shared.hpp"
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
+#include "core/render/chunks.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include <map>
@@ -58,7 +59,26 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::DeviceLocalBuffer> lastIndexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastPositionBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastObjToWorldMat;
-    std::vector<std::string> hitGroupNames;
+    std::vector<uint32_t> hitGroupNameIds;
+
+    struct CachedChunkRow {
+        std::shared_ptr<Chunk1> chunk;
+        int64_t latestVersion = -1;
+        int64_t blasVersion = -1;
+        uint32_t geometryCount = 0;
+        std::shared_ptr<std::vector<VkDeviceAddress>> indexBufferAddresses;
+        std::shared_ptr<std::vector<VkDeviceAddress>> positionBufferAddresses;
+        std::shared_ptr<std::vector<VkDeviceAddress>> materialBufferAddresses;
+        std::shared_ptr<std::vector<uint32_t>> geometryGroupIds;
+        std::shared_ptr<vk::BLAS> blas;
+        std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer;
+        std::shared_ptr<vk::DeviceLocalBuffer> positionBuffer;
+        std::shared_ptr<vk::DeviceLocalBuffer> materialBuffer;
+        std::shared_ptr<std::vector<LightInfo>> lightInfos;
+        std::shared_ptr<vk::DeviceLocalBuffer> lightBuffer;
+        uint32_t lightCount = 0;
+    };
+    std::vector<CachedChunkRow> cachedChunkRows;
 
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
 
@@ -73,7 +93,8 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
                           uint32_t fallbackHitGroupIndex,
                           uint32_t shadowHitGroupIndex,
                           std::shared_ptr<vk::CommandBuffer> commandBuffer,
-                          std::shared_ptr<vk::SBT> updateSbt,
-                          std::shared_ptr<vk::SBT> querySbt);
+                           std::shared_ptr<vk::SBT> updateSbt,
+                           std::shared_ptr<vk::SBT> querySbt);
+    CachedChunkRow &refreshCachedChunkRow(size_t index, const std::shared_ptr<Chunk1> &chunk);
     void render();
 };
